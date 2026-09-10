@@ -1,0 +1,7 @@
+# 构建产物
+build/
+*.o
+*.a
+
+# macOS
+.DS_Store
