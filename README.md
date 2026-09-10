@@ -19,10 +19,15 @@
 | 按键边沿检测、卸载补发"全部抬起" | 键位映射、宏、连发等业务逻辑 |
 | 设备类型判定、槽位与容量管理 | 参数持久化、UI、日志 |
 
-XInput（Xbox 手柄）的**协议知识**在这里（固定布局 + 归一化入口），
-但它的**端点管线**（TinyUSB 类驱动、Xbox 初始化握手）在独立仓库里，
-以 submodule 形式挂在 `adapters/` 下 —— 换个 USB 栈只要换那个适配器，
-core 一行都不用改。
+XInput（Xbox 手柄）的**协议知识**在这里（固定布局 + 归一化入口 `hidkit_xinput_report()`），
+但它的**端点管线**（TinyUSB 类驱动、Xbox 初始化握手）在独立仓库
+[**hidkit-tusb-xinput**](https://github.com/RiderLty/hidkit-tusb-xinput) 里。
+
+注意：**适配器不由本仓库挂载**。core 零平台依赖、不引用任何 USB 栈头文件，
+所以本仓库里没有、也不会有 submodule —— 谁用谁挂（`git submodule add ... lib/hidkit-tusb-xinput`），
+接入步骤见该仓库 README 的「接入清单」，适配器与 core 的分工约定见
+[`adapters/README.md`](adapters/README.md)。换个 USB 栈（CherryUSB / ESP-IDF …）
+只要另写一个适配器，core 一行都不用改。
 
 ---
 
@@ -157,8 +162,14 @@ target_compile_definitions(your_app PRIVATE
 3. 收到中断报文 → `hidkit_report(slot, buf, len)`；
 4. 卸载 → `hidkit_umount(slot)`。
 
-CherryUSB / ESP-IDF / nRF 等都照这四步。XInput 这类**没有 HID 接口**的设备，
-由对应适配器把厂商报文解析成 `hidkit_xinput_pad_t` 后调用 `hidkit_xinput_report()`。
+CherryUSB / ESP-IDF / nRF 等都照这四步；**带完整代码的接线说明**（含每个字段怎么填、
+设备类型怎么判定）见 [`examples/README.md`](examples/README.md)。
+
+XInput 这类**没有 HID 接口**的设备多一步：由
+[hidkit-tusb-xinput](https://github.com/RiderLty/hidkit-tusb-xinput) 适配器把厂商报文解析成
+`hidkit_xinput_pad_t` 后调用 `hidkit_xinput_report()`，需要一个类驱动注册钩子
+（`usbh_app_driver_get_cb()`，全工程只能有一个定义）。**接入清单、自检日志与常见错误**
+见该仓库 README；[`examples/README.md`](examples/README.md) 也有一份精简版。
 
 ### 加一个新设备（手柄）
 
