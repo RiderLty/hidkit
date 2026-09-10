@@ -202,8 +202,8 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
         want = KIND_GAMEPAD;                  /* 适配器（如 XInput）已确认是手柄 */
     } else if (has_desc) {
 #if HIDKIT_ENABLE_GAMEPAD
-        if (gamepad_hid_mount(-1, dev->vid, dev->pid, dev->report_desc,
-                              dev->report_desc_len)) {
+        // 只做 VID:PID 查表（不占槽位）—— 槽位要在下面确认接管后才分配
+        if (gamepad_hid_match(dev->vid, dev->pid)) {
             want = KIND_GAMEPAD;              /* 已知手柄布局（VID:PID 命中） */
         } else
 #endif

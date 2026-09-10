@@ -46,6 +46,20 @@ static gamepad_info_t g_gp[HIDKIT_MAX_SLOTS];
  * 公共 API 实现
  *--------------------------------------------------------------------*/
 
+// ── 按 VID/PID 查解析器（纯函数，不碰槽位状态）──
+// 添加新手柄：只改这一处（+ 上面的 #include）
+static gp_parse_fn gp_lookup(uint16_t vid, uint16_t pid)
+{
+    if (ds5_match(vid, pid))    return ds5_parse;
+    if (azeron_match(vid, pid)) return azeron_parse;
+    return NULL;   // 未知手柄
+}
+
+bool gamepad_hid_match(uint16_t vid, uint16_t pid)
+{
+    return gp_lookup(vid, pid) != NULL;
+}
+
 bool gamepad_hid_mount(int8_t slot, uint16_t vid, uint16_t pid,
                        const uint8_t *desc_report, uint16_t desc_len)
 {
@@ -59,26 +73,14 @@ bool gamepad_hid_mount(int8_t slot, uint16_t vid, uint16_t pid,
     gamepad_info_t *gp = &g_gp[slot];
     memset(gp, 0, sizeof(*gp));
 
-    // ── 按 VID/PID 注册解析器 ──
-    // 添加新手柄：在此处加 else if
+    gp_parse_fn parse = gp_lookup(vid, pid);
+    if (!parse) return false;   // 未知手柄（槽位保持清零 = 未激活）
 
-    if (ds5_match(vid, pid)) {
-        gp->parse = ds5_parse;
-        gp->active = true;
-        gp->vid = vid;
-        gp->pid = pid;
-        return true;
-    }
-    if (azeron_match(vid, pid)) {
-        gp->parse = azeron_parse;
-        gp->active = true;
-        gp->vid = vid;
-        gp->pid = pid;
-        return true;
-    }
-
-    // 未知手柄
-    return false;
+    gp->parse = parse;
+    gp->active = true;
+    gp->vid = vid;
+    gp->pid = pid;
+    return true;
 }
 
 void gamepad_hid_umount(int8_t slot)

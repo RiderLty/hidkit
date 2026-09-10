@@ -49,6 +49,19 @@ typedef hidkit_gamepad_state_t gamepad_state_t;
  *--------------------------------------------------------------------*/
 
 /**
+ * @brief 已知手柄的 VID/PID 匹配（纯查表，不碰槽位状态）
+ *
+ * 用途：hidkit_mount() 需要在**分配槽位之前**判断"这个设备是不是已知手柄"
+ * （命中才占槽位）。原来这一步是拿 gamepad_hid_mount(-1, ...) 当探测用的，
+ * 但该入口有 slot < 0 守界，于是探测恒失败 —— 所有已知手柄（DS5/Azeron）
+ * 都被判成"不认识"，随后落到 NKRO 分支、最终 overall 返回未消费。
+ * 探测与挂载拆成两个函数后这类误用不可能再发生。
+ *
+ * @return true = 是本表内的已知手柄
+ */
+bool gamepad_hid_match(uint16_t vid, uint16_t pid);
+
+/**
  * @brief 手柄 HID 设备挂载：按 VID/PID 匹配已知手柄，注册解析函数
  *
  * @param slot         本设备占用的槽位（< 0 或越界一律返回 false）

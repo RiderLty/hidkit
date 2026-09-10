@@ -533,14 +533,18 @@ static void test_parser_two_byte_globals(void)
     CHECK(hid_mouse_parse(&d, k_desc_two_byte_globals, sizeof(k_desc_two_byte_globals)),
           "应解析成功");
     /* 修复前：0x06 不生效（Usage Page 留 0）、0x96 不生效（Report Count 留 1）、
-     * 0x97 不生效（Report Count 留 5）→ 字段数会是 1 + 5 而不是 3 */
-    CHECK(d.num_fields == 3, "应为 3 个字段（X、Y、Wheel），实得 %u",
+     * 0x97 不生效（Report Count 留 5）→ 末尾那个 Input 会用旧值 5 展开成 5 个字段
+     * （1 + 5 而不是 2）。
+     * 缺陷 3 的修法是"不支持的宽度 → 复位为 0"，即该 Input **不产生字段**：
+     * 复位后仍是 5 → 7 个字段、仍是 1 → 3 个字段（Wheel 在 @16），复位的正确结果是
+     * 只剩 X/Y 两个字段、Wheel 完全不存在。 */
+    CHECK(d.num_fields == 2, "应只剩 X/Y 两个字段（Wheel 所属的 Report Count 不可读"
+                            "→ 复位为 0 → 不产生字段），实得 %u",
           (unsigned)d.num_fields);
     CHECK_FIELD(d.fields[0], 0x01, 0x30, 0);
     CHECK_FIELD(d.fields[1], 0x01, 0x31, 8);
-    CHECK_FIELD(d.fields[2], 0x01, 0x38, 16);
-    CHECK(d.idx_x == 0 && d.idx_y == 1 && d.idx_wheel == 2,
-          "三个轴索引都应命中，实得 (%u,%u,%u)", (unsigned)d.idx_x,
+    CHECK(d.idx_x == 0 && d.idx_y == 1 && d.idx_wheel == 0xFF,
+          "X/Y 应命中、Wheel 应不存在，实得 (%u,%u,%u)", (unsigned)d.idx_x,
           (unsigned)d.idx_y, (unsigned)d.idx_wheel);
 
     /* 2 字节形式的 Report ID（0x86）：修复前不生效 → 整份描述符被当成"无 ID" */
@@ -656,10 +660,166 @@ static void test_nkro_two_byte_page_and_end_collection(void)
     hidkit_umount(slot);
 }
 
+/* 缺陷 6：Report Count = 0 的 main item 不产生字段、也不占位。
+ *
+ * 描述符里 "Report Count 0 + Input" 是合法写法（常用作空操作/占位），原有实现
+ * 把 count == 0 当成 1，白推进 Report Size 位 —— 与缺陷 1 同类的"其后所有字段
+ * 偏移全错"。这里 X/Y 之后放一个 Report Size 8 / Report Count 0 的空操作项，
+ * Wheel 必须紧接在 bit 16，而不是被推到 bit 24。 */
+static const uint8_t k_desc_zero_report_count[] = {
+    0x05, 0x01,        /* Usage Page (Generic Desktop) */
+    0x09, 0x02,        /* Usage (Mouse) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x09, 0x30,        /*   Usage (X) */
+    0x09, 0x31,        /*   Usage (Y) */
+    0x15, 0x81,        /*   Logical Minimum (-127) */
+    0x25, 0x7F,        /*   Logical Maximum (127) */
+    0x75, 0x08,        /*   Report Size (8) */
+    0x95, 0x02,        /*   Report Count (2) */
+    0x81, 0x06,        /*   Input (Data,Var,Rel) → X@0、Y@8 */
+    0x95, 0x00,        /*   Report Count (0)   → 空操作项 */
+    0x81, 0x01,        /*   Input (Const,Var,Abs) */
+    0x09, 0x38,        /*   Usage (Wheel) */
+    0x95, 0x01,        /*   Report Count (1) */
+    0x81, 0x06,        /*   Input (Data,Var,Rel) → Wheel@16（修复前被推到 @24） */
+    0xC0,              /* End Collection */
+};
+
+/* 缺陷 6（续）：NKRO 路径同一处写法（Report Count 0 → 按 1 处理）。
+ * Report Size 先置 1，空操作项若白占位，后面的键位段就会整体偏移 1 位。 */
+static const uint8_t k_nkro_desc_zero_report_count[] = {
+    0x05, 0x01,        /* Usage Page (Generic Desktop) */
+    0x09, 0x06,        /* Usage (Keyboard) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x05, 0x07,        /*   Usage Page (Keyboard/Keypad) */
+    0x75, 0x01,        /*   Report Size (1) */
+    0x95, 0x00,        /*   Report Count (0)   → 空操作项 */
+    0x81, 0x01,        /*   Input (Const,Var,Abs) */
+    0x19, 0x04,        /*   Usage Minimum (4) */
+    0x29, 0x08,        /*   Usage Maximum (8) */
+    0x95, 0x05,        /*   Report Count (5) */
+    0x81, 0x02,        /*   Input (Data,Var,Abs) → 位段应从 bit 0 起 */
+    0xC0,              /* End Collection */
+};
+
+static void test_parser_zero_report_count(void)
+{
+    printf("描述符解析：Report Count = 0 不产生字段、不占位（缺陷 6）\n");
+    hid_mouse_desc_t d;
+    CHECK(hid_mouse_parse(&d, k_desc_zero_report_count,
+                          sizeof(k_desc_zero_report_count)),
+          "应解析成功");
+    CHECK(d.num_fields == 3, "应展开 3 个字段（X + Y + Wheel），实得 %u",
+          (unsigned)d.num_fields);
+    CHECK_FIELD(d.fields[0], 0x01, 0x30, 0);
+    CHECK_FIELD(d.fields[1], 0x01, 0x31, 8);
+    /* 空操作项若按 1 个字段算，这里会变成 24（多推一个字节） */
+    CHECK_FIELD(d.fields[2], 0x01, 0x38, 16);
+
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x0bad, .pid = 0x0002, .dev_addr = 12, .itf = 0,
+                               .proto = HIDKIT_PROTO_MOUSE,
+                               .report_desc = k_desc_zero_report_count,
+                               .report_desc_len = sizeof(k_desc_zero_report_count) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管鼠标，得到 %d", slot);
+    const uint8_t r0[] = { 0x00, 0x00, 0x00 };      /* 首帧建基线 */
+    hidkit_report(slot, r0, sizeof(r0));
+    const uint8_t r1[] = { 0x05, 0xFB, 0x01 };      /* X=5, Y=-5, Wheel=1 */
+    hidkit_report(slot, r1, sizeof(r1));
+    CHECK(g_mouse.dx == 5 && g_mouse.dy == -5 && g_mouse.wheel == 1,
+          "位移/滚轮应为 (5,-5,1)，实得 (%d,%d,%d)",
+          g_mouse.dx, g_mouse.dy, g_mouse.wheel);
+    hidkit_umount(slot);
+
+    /* NKRO 路径 */
+    hid_nkro_desc_t nd;
+    CHECK(hid_nkro_parse(&nd, k_nkro_desc_zero_report_count,
+                         sizeof(k_nkro_desc_zero_report_count)),
+          "NKRO 描述符应解析成功");
+    CHECK(nd.num_spans == 1, "应只有 1 个键位段，实得 %u", (unsigned)nd.num_spans);
+    CHECK(nd.spans[0].usage_min == 0x04 && nd.spans[0].count == 5 &&
+          nd.spans[0].bit_offset == 0,
+          "位图段应为 0x04 起 5 位、偏移 0（修复前偏移 1），实得 min=0x%02X count=%u off=%u",
+          (unsigned)nd.spans[0].usage_min, (unsigned)nd.spans[0].count,
+          (unsigned)nd.spans[0].bit_offset);
+
+    ev_reset();
+    hidkit_dev_info_t ninfo = { .vid = 0x04d9, .pid = 0xa294, .dev_addr = 13, .itf = 1,
+                                .proto = HIDKIT_PROTO_NONE,
+                                .report_desc = k_nkro_desc_zero_report_count,
+                                .report_desc_len = sizeof(k_nkro_desc_zero_report_count) };
+    int8_t nslot = hidkit_mount(&ninfo);
+    CHECK(nslot >= 0, "应接管为 NKRO 键盘，得到 %d", nslot);
+    const uint8_t nr[] = { 0x01 };
+    CHECK(hidkit_report(nslot, nr, sizeof(nr)), "报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04),
+          "bit0 应产生 0x04 按下，实得 %d 个事件", g_key_n);
+    hidkit_umount(nslot);
+}
+
+/* 缺陷 7（回归用例）：HID 手柄布局表（DS5）整条挂载路径。
+ *
+ * 修复前 hidkit_mount() 用 gamepad_hid_mount(-1, ...) 当"是不是已知手柄"的探测，
+ * 而该入口有 slot < 0 守界 → 探测恒失败 → 已知手柄全部落到 NKRO 分支、
+ * 最终返回未消费（真机现象：`hidkit: unhandled 054c:0ce6 proto=0 desc=yes`）。
+ * 此前没有任何用例覆盖"按 VID/PID 认领 HID 手柄"，所以漏到了真机上。 */
+static void test_hid_gamepad_ds5(void)
+{
+    printf("HID 手柄布局（DS5 054c:0ce6）：VID/PID 命中应认领并出事件\n");
+    ev_reset();
+
+    /* DS5 的解析完全由 VID/PID 决定，不看报告描述符；这里给一份最小占位描述符，
+     * 仅仅为了满足 hidkit_mount() 的"有描述符才尝试布局表"条件 */
+    static const uint8_t k_placeholder_desc[] = { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0 };
+
+    hidkit_dev_info_t info = { .vid = 0x054c, .pid = 0x0ce6, .dev_addr = 11, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_placeholder_desc,
+                               .report_desc_len = sizeof(k_placeholder_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应认领为手柄，实得 %d（修复前恒为 -1）", slot);
+    CHECK(hidkit_is_gamepad(slot), "应被标记为手柄");
+
+    /* DS5 报文：Report ID(0x01) + 结构体（真机 64 字节）
+     *   ls_x=192 → 中心化 +64 → <<8 = 16384；lt=255 → 255*(32767/255) = 32640
+     *   buttons（4B LE）= 0x28：dpad 枚举 nibble = 8（释放），bit5 = Cross 按下 */
+    uint8_t rpt[64];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x01;      /* Report ID */
+    rpt[1] = 192;       /* ls_x */
+    rpt[2] = 128;       /* ls_y（中心）*/
+    rpt[3] = 128;       /* rs_x */
+    rpt[4] = 128;       /* rs_y */
+    rpt[5] = 255;       /* lt */
+    rpt[6] = 0;         /* rt */
+    rpt[7] = 0;         /* seq */
+    rpt[8] = 0x28;      /* buttons: dpad=8(释放) + Cross */
+
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_gp.n == 1, "应回调一次手柄绝对状态，实得 %d", g_gp.n);
+    CHECK(g_gp.ls_x == 16384, "ls_x 应为 16384，实得 %d", g_gp.ls_x);
+    CHECK(g_gp.lt == 32640, "lt 应为 32640，实得 %d", g_gp.lt);
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_GAMEPAD | BTN_A) &&
+          g_key[0].pressed,
+          "应恰好一个 Cross(BTN_A) 按下事件，实得 %d 个（首个 code=0x%04X）",
+          g_key_n, g_key_n ? g_key[0].code : 0);
+
+    /* 抬起：dpad 仍为释放、Cross 清掉 → 应补一个松开事件，且不再有轴回调外的杂事件 */
+    rpt[8] = 0x08;
+    hidkit_report(slot, rpt, sizeof(rpt));
+    CHECK(g_key_n == 2 && g_key[1].code == (HIDKIT_CODE_GAMEPAD | BTN_A) &&
+          !g_key[1].pressed, "应有一个 Cross 松开事件，实得 %d 个", g_key_n);
+
+    hidkit_umount(slot);
+    CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
+}
+
 int main(void)
 {
     hidkit_init();
     printf("== hidkit 主机侧样本测试 ==\n");
+    test_hid_gamepad_ds5();
     test_boot_keyboard();
     test_fixed_mouse();
     test_nkro_keyboard();
@@ -672,6 +832,7 @@ int main(void)
     test_parser_end_collection_clears_local();
     test_mouse_multi_report_id();
     test_nkro_two_byte_page_and_end_collection();
+    test_parser_zero_report_count();
     printf("\n结果：%d 通过，%d 失败\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
