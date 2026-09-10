@@ -184,6 +184,8 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 已知问题与残余限制见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)：第一版是**忠实移植**，
 移植时故意保留的 5 条描述符解析缺陷现已修复，每条都补了样本用例把规范行为固定住
 （`tests/host/test_hidkit.c` 末节「缺陷修复样本」，在修复前的实现上会红）；
+移植完成后又修了两条（`Report Count = 0` 的规范符合性、以及一处**移植引入的回归**：
+HID 手柄布局表曾被槽位守界挡住探测调用而恒不命中），同样各带回归用例；
 仍未实现的部分（Push/Pop、描述符容量上限等）也逐条列在里面。
 
 ---

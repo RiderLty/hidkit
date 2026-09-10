@@ -2,9 +2,14 @@
 
 本库第一版的目标是**把 pico-hid-mapper 里验证过的解析行为逐位搬过来**，所以当时
 **故意保留**了一批描述符解析缺陷，并用主机侧样本测试把旧行为固定住。
-这批缺陷（5 条）现在已经修完，逐条记在下面「已修复」一节；每条修复都补了样本用例
+这批缺陷（1–5 条）现在已经修完，逐条记在下面「已修复」一节；每条修复都补了样本用例
 （见 `tests/host/test_hidkit.c` 末节「缺陷修复样本」），用例按规范行为断言，
 **在修复前的实现上会红**（实测：6 个新用例共 25 条断言失败）。
+
+移植完成之后又修了两条（6、7）：第 6 条是与上面同源同类的规范符合性问题（从
+pico-hid-mapper 继承），第 7 条是**移植过程本身引入的回归**（把 `instance` 改成
+`slot` 时加的守界误伤了探测调用），真机上表现为「手柄全部不认识」。两条同样按
+「先加用例、确认在修复前会红」的流程做。
 
 ## 已修复
 
@@ -82,6 +87,66 @@
   `idx_x/idx_y/idx_wheel` 只指向**第一个**匹配字段，其余 Report 的该轴不解析
   （丢事件，不会读错值）；鼠标按键上限仍是 8（`uint8_t` 位掩码宽度，
   `HID_MOUSE_MAX_BTNS`），与修复前一致。
+
+---
+
+### 6. `Report Count = 0` 的 main item 被当成 1 个字段
+
+`Report Count`（`0x95`）为 0 时，按规范该 main item **不产生任何字段、也不占位**
+（全局量默认值就是 0，"Report Count 0 + Input" 是合法的空操作写法，描述符里用来
+占位/占坑）。两处解析路径都把它改成 1 再用：
+
+```c
+uint8_t count = glb_report_count;
+if (count == 0) count = 1;                                  /* 通用字段解析 */
+uint16_t count = glb_report_count ? glb_report_count : 1;   /* NKRO 路径 */
+```
+
+于是它白推进了 `Report Size` 位 —— 与第 1 条**同一失效模式**：其后的字段偏移
+全部错位（实测：X/Y 前放一个 `Report Size 8 / Report Count 0` 的空操作项，Wheel
+被从 bit 16 推到 bit 24，跨出报文长度、事件直接丢失）。
+
+- 修法：`src/hid_parser.c` 两处都改为直接取 `glb_report_count`（0 即 0）——
+  `0x81 Input` 分支的四个出口（常量、usage 列表、usage 范围、无 usage）在
+  `count == 0` 时本来就都推进 0 位，只需去掉那个替换。
+- 用例：`k_desc_zero_report_count`（鼠标路径：Wheel 必须仍在 bit 16、报文要解析出
+  `wheel=1`）与 `k_nkro_desc_zero_report_count`（NKRO 路径：键位段偏移必须是 0）。
+  把旧行为放回去，这两条共 4 条断言立刻复红。
+- 连带更新：第 3 条的用例（`k_desc_two_byte_globals`）末尾那个 Input 原本断言
+  "Report Count 复位后按 1 个字段算" = 3 个字段 —— 那是旧行为的产物。按规范，
+  4 字节 `Report Count`（不支持 → 复位为 0）之后该 Input 不产生字段，故期望改为
+  2 个字段（X/Y）、`idx_wheel == 0xFF`；这个判据比原来更能区分"复位为 0"与
+  "留着旧值 5"（后者会展开 7 个字段）。
+
+### 7. 移植引入的回归：HID 手柄布局表恒不命中（真机上"手柄全不认识"）
+
+真机现象（DualSense，VID:PID `054c:0ce6`，描述符已抓到）：
+
+```
+[HKDBG]  hidkit: unhandled 054c:0ce6 proto=0 desc=yes
+```
+
+根因不在布局表，而在**探测调用被守界挡掉**：`hidkit_mount()` 判定"这是不是已知
+手柄"时用的是
+
+```c
+gamepad_hid_mount(-1, dev->vid, dev->pid, ...)   /* -1 = 只探测，不占槽位 */
+```
+
+而 `gamepad_hid_mount()` 入口有 `slot < 0` 守界（移植时按"`instance`(uint8_t) →
+`slot`(int8_t) 并在入口守界"这条规则统一加的）→ 探测**恒**返回 false → DS5/Azeron
+等所有已知手柄都落到 NKRO 分支、最终返回未消费。原实现里 `instance` 无符号，
+这个守界无害；改成有符号的 `slot` 后，"拿 -1 当探测"这个隐含约定就被破坏了。
+
+- 修法：把"匹配"与"挂载"拆开 —— 新增 `gamepad_hid_match(vid, pid)`（纯 VID/PID
+  查表，不碰槽位状态），`gp_lookup()` 收拢匹配规则供两者共用（新增手柄仍只改一处）；
+  `hidkit_mount()` 改用 `gamepad_hid_match()` 探测，确认接管后才分配槽位、再
+  `gamepad_hid_mount(slot, ...)`。
+- 用例：`test_hid_gamepad_ds5`（挂载 `054c:0ce6` → 断言认领、`hidkit_is_gamepad()`、
+  报文解析出 Cross 按下/松开与轴值）。**修复前 8 条断言失败**。
+- 为什么一直没被发现：样本测试里没有任何用例走"按 VID/PID 认领 HID 手柄"这条路径
+  （`test_xinput` 只测归一化入口，注释里写着布局表"由真机回归覆盖"），于是这条
+  路径只在真机上暴露。
 
 ---
 

@@ -183,8 +183,11 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
             if (i >= len) break;
             uint8_t flags = data[i++];
 
+            // HID 规范：Report Count = 0 的 main item 不产生任何字段、也不占位
+            // （全局量默认值就是 0，"Report Count 0 + Input" 是合法的空操作写法）。
+            // 原来 count == 0 时按 1 个字段算，会白推进 Report Size 位，使**其后
+            // 所有字段偏移全部错位** —— 与缺陷 1 同一失效模式。
             uint8_t count = glb_report_count;
-            if (count == 0) count = 1;
 
             bool is_const   = (flags & 0x01) != 0;
             bool is_rel     = (flags & 0x04) != 0;
@@ -572,7 +575,8 @@ bool HIDKIT_HOT(hid_nkro_parse)(hid_nkro_desc_t *desc, const uint8_t *data, uint
             if (i >= len) break;
             uint8_t flags = data[i++];
 
-            uint16_t count = glb_report_count ? glb_report_count : 1;
+            // 同上（缺陷 6）：Report Count = 0 不产生字段、不占位
+            uint16_t count = glb_report_count;
 
             if (flags & HID_INPUT_CONSTANT) {
                 bit_offset += (uint16_t)glb_report_size * count;
