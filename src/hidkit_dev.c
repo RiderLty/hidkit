@@ -14,6 +14,7 @@
 #include "hidkit.h"
 #include "hidkit_internal.h"
 #include "hidkit_hooks.h"
+#include "hidkit_debug.h"
 
 #include "hid_parser.h"
 #include "hid_dispatch.h"
@@ -41,6 +42,7 @@ typedef struct {
     const uint16_t *btn_map;               /* 手柄布局表（指向静态表，卸载时补发松开要用） */
     uint8_t  btn_count;
     uint32_t seq;                          /* 分配序号：EVICT_IDLE 的退化判据 */
+    bool     logged_unconsumed;             /* 该槽位的「报文未消费」只报一次 */
 #if defined(HIDKIT_TICK_MS)
     uint32_t last_tick;                    /* 最近一次收到报文的时刻 */
 #endif
@@ -155,6 +157,8 @@ static int8_t slot_alloc(void)
         }
     }
     if (victim >= 0) {
+        HIDKIT_LOG("hidkit: evict slot %d (%04x:%04x)\n",
+                   victim, s_slot[victim].vid, s_slot[victim].pid);
         slot_release(victim);   /* 补发松开，避免上层按键残留 */
         return victim;
     }
@@ -194,6 +198,8 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
         want = KIND_MOUSE;
     } else if (dev->proto == HIDKIT_PROTO_KEYBOARD) {
         want = KIND_KB;                       /* boot 协议，固定格式 */
+    } else if (dev->proto == HIDKIT_PROTO_GAMEPAD) {
+        want = KIND_GAMEPAD;                  /* 适配器（如 XInput）已确认是手柄 */
     } else if (has_desc) {
 #if HIDKIT_ENABLE_GAMEPAD
         if (gamepad_hid_mount(-1, dev->vid, dev->pid, dev->report_desc,
@@ -210,10 +216,16 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
         }
     }
 
-    if (want == KIND_NONE) return HIDKIT_UNHANDLED;
+    if (want == KIND_NONE) {
+        HIDKIT_LOG("hidkit: unhandled %04x:%04x proto=%u desc=%s\n",
+                   dev->vid, dev->pid, (unsigned)dev->proto, has_desc ? "yes" : "none");
+        return HIDKIT_UNHANDLED;
+    }
 
     int8_t slot = slot_alloc();
     if (slot < 0) {
+        HIDKIT_LOG("hidkit: no slot for %04x:%04x (policy=%d)\n",
+                   dev->vid, dev->pid, (int)HIDKIT_OVERFLOW);
         hidkit_input_dropped(-1, dev->vid, dev->pid);
         return slot;
     }
@@ -253,6 +265,8 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
 #if defined(HIDKIT_TICK_MS)
     s_slot[slot].last_tick = (uint32_t)HIDKIT_TICK_MS();
 #endif
+    HIDKIT_LOG("hidkit: slot %d <- %04x:%04x proto=%u kind=%d\n",
+               slot, dev->vid, dev->pid, (unsigned)dev->proto, (int)s_slot[slot].kind);
     return slot;
 }
 
@@ -303,6 +317,11 @@ bool hidkit_report(int8_t slot, const uint8_t *buf, uint16_t len)
             return true;
         }
 #endif
+        if (!s_slot[slot].logged_unconsumed) {
+            s_slot[slot].logged_unconsumed = true;
+            HIDKIT_LOG("hidkit: slot %d gamepad report not consumed (len=%u)\n",
+                       slot, (unsigned)len);
+        }
         return false;   /* 认了设备但这份报文不认识 → 交宿主 */
 #else
         return false;
@@ -316,7 +335,12 @@ bool hidkit_report(int8_t slot, const uint8_t *buf, uint16_t len)
 
 bool hidkit_umount(int8_t slot)
 {
-    if (!hidkit_slot_alive(slot)) return false;
+    if (!hidkit_slot_alive(slot)) {
+        HIDKIT_LOG("hidkit: umount on inactive slot %d\n", (int)slot);
+        return false;
+    }
+    HIDKIT_LOG("hidkit: umount slot %d (%04x:%04x)\n", (int)slot,
+               s_slot[slot].vid, s_slot[slot].pid);
     slot_release(slot);
     return true;
 }

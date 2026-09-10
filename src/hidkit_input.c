@@ -57,3 +57,10 @@ HIDKIT_WEAK void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid)
     (void)vid;
     (void)pid;
 }
+
+/* 库内诊断出口的弱默认实现：什么都不做。
+ * 想看到 HIDKIT_DEBUG=1 时的库内自证信息，就在自己工程里实现这个函数并接到日志。 */
+HIDKIT_WEAK void hidkit_debug_printf(const char *fmt, ...)
+{
+    (void)fmt;
+}

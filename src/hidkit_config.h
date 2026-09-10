@@ -77,6 +77,13 @@
 #define HIDKIT_ENABLE_ADAPTER_AZERON 1
 #endif
 
+/* 库内诊断输出（详见 src/hidkit_debug.h）。
+ * 1 = 打冷路径自证信息（认领判定/解析失败/挤出/首次丢弃），需要你自己实现
+ *     hidkit_debug_printf 才能看到东西；0 = 连调用点一起裁掉（默认）。 */
+#ifndef HIDKIT_DEBUG
+#define HIDKIT_DEBUG 0
+#endif
+
 /* 时间源（毫秒、单调递增），用于 HIDKIT_OVERFLOW_EVICT_IDLE 判断"最久没有报文"。
  * 未定义时退化为"挤掉最老的槽位"，不依赖任何时间函数。 */
 /* #define HIDKIT_TICK_MS() my_millis() */

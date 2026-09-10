@@ -37,6 +37,10 @@ extern "C" {
 #define HIDKIT_PROTO_NONE     0
 #define HIDKIT_PROTO_KEYBOARD 1
 #define HIDKIT_PROTO_MOUSE    2
+/* 适配器已经确认这是手柄（例如 XInput：没有 HID 描述符，故不能靠描述符判定）。
+ * 填这个 proto 调 hidkit_mount() 即认领一个手柄槽位，之后用
+ * hidkit_xinput_report() 或 hidkit_report() 送报文。 */
+#define HIDKIT_PROTO_GAMEPAD  3
 
 typedef struct {
     uint16_t vid;
