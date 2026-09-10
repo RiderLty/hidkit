@@ -203,9 +203,9 @@ HID 手柄布局表曾被槽位守界挡住探测调用而恒不命中），同�
 
 ## 来源与许可
 
-代码提取自 [pico-hid-mapper](https://github.com/RiderLty/pico-hid-mapper) 中经过实际设备
-验证的 HID/XInput 解析部分（键鼠描述符解析、NKRO、boot 协议、DS5/Azeron/XInput 手柄布局）。
-移植时只做了三类改动：去掉平台依赖（Pico SDK 宏、应用侧的 core/makcu/授权逻辑）、
+代码提取自作者一个**经过实际设备验证的外设固件工程**（私有仓库）中的 HID/XInput 解析部分
+（键鼠描述符解析、NKRO、boot 协议、DS5/Azeron/XInput 手柄布局）。
+移植时只做了三类改动：去掉平台依赖（Pico SDK 宏与应用侧业务逻辑）、
 统一事件出口与 code 空间、槽位管理归本库。
 
 以 [MIT 许可证](LICENSE) 发布（Copyright (c) 2026 RiderLty）。
