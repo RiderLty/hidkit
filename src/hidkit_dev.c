@@ -47,7 +47,6 @@ typedef struct {
 } hidkit_slot_t;
 
 static hidkit_slot_t s_slot[HIDKIT_MAX_SLOTS];
-static hidkit_callbacks_t s_cb;
 static uint32_t s_alloc_seq;
 static uint8_t s_kb_count, s_mouse_count;
 
@@ -61,29 +60,26 @@ static hid_nkro_dev_t   s_nkro[HIDKIT_MAX_SLOTS];
 
 void hidkit_emit_key(int8_t slot, uint16_t code, bool pressed)
 {
-    if (!s_cb.key) return;
     uint16_t c = code;
     bool p = pressed;
     if (!hidkit_hook_key(&c, &p)) return;   /* 钩子可改写或吞掉 */
     if (c == 0) return;                     /* 0 = 无效/空槽位约定 */
-    s_cb.key(slot, c, p);
+    hidkit_input_key(slot, c, p);
 }
 
 void hidkit_emit_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
 {
-    if (!s_cb.mouse_abs) return;
     int32_t x = dx, y = dy, w = wheel;
     if (!hidkit_hook_mouse_abs(&x, &y, &w)) return;
     if (x == 0 && y == 0 && w == 0) return;
-    s_cb.mouse_abs(slot, x, y, w);
+    hidkit_input_mouse_abs(slot, x, y, w);
 }
 
 void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
 {
-    if (!s_cb.gamepad_abs) return;
     if (!hidkit_hook_gamepad_abs(&ls_x, &ls_y, &rs_x, &rs_y, &lt, &rt)) return;
-    s_cb.gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
+    hidkit_input_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
 }
 
 bool hidkit_slot_alive(int8_t slot)
@@ -178,13 +174,8 @@ static void slot_touch(int8_t slot)
  * 入口
  *--------------------------------------------------------------------*/
 
-void hidkit_init(const hidkit_callbacks_t *cb)
+void hidkit_init(void)
 {
-    if (cb) {
-        s_cb = *cb;
-    } else {
-        memset(&s_cb, 0, sizeof(s_cb));
-    }
     for (int8_t i = 0; i < (int8_t)HIDKIT_MAX_SLOTS; i++) slot_clear(i);
     s_alloc_seq = 0;
     s_kb_count = 0;
@@ -223,7 +214,7 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
 
     int8_t slot = slot_alloc();
     if (slot < 0) {
-        if (s_cb.dropped) s_cb.dropped(-1, dev->vid, dev->pid);
+        hidkit_input_dropped(-1, dev->vid, dev->pid);
         return slot;
     }
 

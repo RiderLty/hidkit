@@ -49,25 +49,31 @@ typedef struct {
 } hidkit_dev_info_t;
 
 /*--------------------------------------------------------------------+
- * 出口回调（注册一次，所有设备共用；用 slot 区分设备）
+ * 出口：弱符号函数，**在自己的工程里定义同名函数即可覆盖**
+ *
+ *   void hidkit_input_key(int8_t slot, uint16_t code, bool pressed) {
+ *       if (HIDKIT_CODE_SEG(code) == HIDKIT_CODE_KEYBOARD) { ... }
+ *   }
+ *
+ * 库里给的是空实现（弱符号），不定义也不会链接失败 —— 与 hidkit_hook_* 同一套机制。
+ * 这样没有回调注册表、没有函数指针，代码更小、无间接调用（实测在 Cortex-M 上也更好
+ * 配合 `__not_in_flash_func` 之类的标注）。
  *--------------------------------------------------------------------*/
 
-typedef struct {
-    /* 键盘 / 鼠标按键 / 手柄按键统一走这里，用 HIDKIT_CODE_* 段前缀区分类型。
-     * 仅在状态变化时回调（边沿由库内检测）。 */
-    void (*key)(int8_t slot, uint16_t code, bool pressed);
+/* 键盘 / 鼠标按键 / 手柄按键统一走这里，用 HIDKIT_CODE_* 段前缀区分类型。
+ * 仅在状态变化时回调（边沿由库内检测）。 */
+void hidkit_input_key(int8_t slot, uint16_t code, bool pressed);
 
-    /* 鼠标位移与滚轮（仅鼠标；不做横向滚轮）。仅在非零时回调。 */
-    void (*mouse_abs)(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
+/* 鼠标位移与滚轮（仅鼠标；不做横向滚轮）。仅在非零时回调。 */
+void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 
-    /* 手柄绝对状态：每份解析成功的报文都会回调（不做去重 —— 手柄报文本身
-     * 就是当前绝对状态）。 */
-    void (*gamepad_abs)(int8_t slot, int32_t ls_x, int32_t ls_y,
-                        int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
+/* 手柄绝对状态：每份解析成功的报文都会回调（不做去重 —— 手柄报文本身
+ * 就是当前绝对状态）。 */
+void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
 
-    /* 可选诊断：设备被丢弃时（槽位耗尽且策略为 DROP_NEW）通知一次 */
-    void (*dropped)(int8_t slot, uint16_t vid, uint16_t pid);
-} hidkit_callbacks_t;
+/* 可选诊断：设备被丢弃时（槽位耗尽且策略为 DROP_NEW）通知一次。 */
+void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 
 /*--------------------------------------------------------------------+
  * 手柄布局：设备原生位 + 位→BTN_* 查表（HID 手柄与 XInput 共用同一结构）
@@ -94,8 +100,8 @@ typedef struct {
  * 入口
  *--------------------------------------------------------------------*/
 
-/* 初始化并注册回调（可重复调用以更换回调）。 */
-void hidkit_init(const hidkit_callbacks_t *cb);
+/* 初始化：清空所有槽位与解析状态（可重复调用）。出口函数是弱符号，无需注册。 */
+void hidkit_init(void);
 
 /*
  * 设备挂载：按 proto / 报告描述符 / VID:PID 表决定是否接管。

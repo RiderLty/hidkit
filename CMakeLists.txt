@@ -17,6 +17,7 @@ project(hidkit C)
 
 set(HIDKIT_SOURCES
     src/hidkit_dev.c
+    src/hidkit_input.c
     src/hidkit_hooks.c
     src/hid_dispatch.c
     src/hid_parser.c

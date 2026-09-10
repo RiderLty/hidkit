@@ -53,9 +53,9 @@ typedef struct {
     uint16_t report_desc_len;
 } hidkit_dev_info_t;
 
-hidkit_init(&callbacks);                          /* 注册回调，一次 */
+hidkit_init();                                    /* 清空状态，一次 */
 int8_t slot = hidkit_mount(&info);                /* >=0 已接管；<0 未消费，交宿主 */
-bool consumed = hidkit_report(slot, buf, len);    /* 解析并触发回调 */
+bool consumed = hidkit_report(slot, buf, len);    /* 解析并触发出口函数 */
 hidkit_umount(slot);                              /* 卸载：补发全部抬起后释放槽位 */
 ```
 
@@ -72,20 +72,49 @@ hidkit_umount(slot);                              /* 卸载：补发全部抬起
 | `0x0100 + 序号` | 鼠标按键 |
 | `0x0200 + BTN_*` | 手柄按键（含由模拟扳机阈值合成出来的 LT/RT 两位） |
 
+出口是**弱符号函数**：库里给空实现，你在自己工程里定义同名函数即覆盖 ——
+没有回调注册表、没有函数指针、没有间接调用（也和 `hidkit_hook_*` 同一套机制）。
+
 ```c
-void (*key)(int8_t slot, uint16_t code, bool pressed);  /* 仅变化时 */
-void (*mouse_abs)(int8_t slot, int32_t dx, int32_t dy, int32_t wheel); /* 仅非零时 */
-void (*gamepad_abs)(int8_t slot, int32_t ls_x, ls_y, rs_x, rs_y, lt, rt);
-                        /* 每份解析成功的报文都回调：手柄报文即绝对状态，不做去重 */
+/* 键盘 / 鼠标按键 / 手柄按键统一走这里，按 code 的段前缀分流。仅变化时调用 */
+void hidkit_input_key(int8_t slot, uint16_t code, bool pressed);
+
+/* 鼠标位移与滚轮。仅非零时调用 */
+void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
+
+/* 手柄绝对状态：每份解析成功的报文都回调（手柄报文即绝对状态，不做去重） */
+void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
+
+/* 可选诊断：设备被丢弃时通知一次 */
+void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 ```
+
+用自己的写法（示例）：
+
+```c
+void hidkit_input_key(int8_t slot, uint16_t code, bool pressed)
+{
+    switch (HIDKIT_CODE_SEG(code)) {
+    case HIDKIT_CODE_KEYBOARD:  /* code & 0xFF 是 HID Usage ID */ break;
+    case HIDKIT_CODE_MOUSE:     /* 鼠标按键序号 */               break;
+    case HIDKIT_CODE_GAMEPAD:   /* BTN_* */                      break;
+    }
+}
+```
+
+slot 用来区分设备（多键盘/多鼠标各占一个）。不定义这些函数也能编译链接，只是收不到事件。
 
 以后新增 HID 设备类型（消费类媒体键等）只需**加一段前缀**，不必改回调签名。
 
-### 可选拦截钩子（弱符号）
+### 可选拦截钩子（同样是弱符号）
 
 `hidkit_hook_key()` / `hidkit_hook_mouse_abs()` / `hidkit_hook_gamepad_abs()`：
-默认直通，在自己的工程里定义同名函数即可**改写或吞掉**事件（做重映射、锁定、屏蔽）。
+在出口函数**之前**调用，可**改写或吞掉**事件（做重映射、锁定、屏蔽），默认直通。
 见 [`src/hidkit_hooks.h`](src/hidkit_hooks.h)。
+
+**两层弱符号的分工**：`hidkit_hook_*` 管"事件要不要发、发成什么"，`hidkit_input_*` 管"发出去之后怎么用"。
+只做映射的话用 hook；要接自己的输入管线就用 input。
 
 ---
 
@@ -123,7 +152,7 @@ target_compile_definitions(your_app PRIVATE
 
 只要满足"能提供基本信息"这一条：
 
-1. 栈初始化的地方调用 `hidkit_init(&cb)`；
+1. 栈初始化的地方调用 `hidkit_init()`，并定义自己需要的 `hidkit_input_*` 出口函数；
 2. 设备挂载回调里填一个 `hidkit_dev_info_t`（vid/pid/addr/itf/proto/report_desc）→ `hidkit_mount()`；
 3. 收到中断报文 → `hidkit_report(slot, buf, len)`；
 4. 卸载 → `hidkit_umount(slot)`。

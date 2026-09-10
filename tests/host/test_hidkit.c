@@ -69,27 +69,22 @@ static void ev_reset(void)
     memset(&g_gp, 0, sizeof(g_gp));
 }
 
-static void on_key(int8_t slot, uint16_t code, bool pressed)
+/* 覆盖弱符号：这就是使用方接入的写法（与 core_input_* 同一风格） */
+void hidkit_input_key(int8_t slot, uint16_t code, bool pressed)
 {
     if (g_key_n < MAX_EV) g_key[g_key_n++] = (key_ev_t){slot, code, pressed};
 }
-static void on_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
+void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
 {
     (void)slot;
     g_mouse.dx = dx; g_mouse.dy = dy; g_mouse.wheel = wheel; g_mouse.n++;
 }
-static void on_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                           int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
+void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
 {
     (void)slot; (void)rs_x; (void)rs_y; (void)rt;
     g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.lt = lt; g_gp.n++;
 }
-
-static const hidkit_callbacks_t g_cb = {
-    .key = on_key,
-    .mouse_abs = on_mouse_abs,
-    .gamepad_abs = on_gamepad_abs,
-};
 
 /* 希望被钩子吞掉的 code（0 = 不吞）*/
 static uint16_t g_hook_swallow;
@@ -473,7 +468,7 @@ static void test_evict(void)
     }
     CHECK(slots[HIDKIT_MAX_SLOTS] >= 0, "超出容量时应挤掉最老的槽位（默认 EVICT_IDLE）");
     CHECK(slots[0] == slots[HIDKIT_MAX_SLOTS], "应复用最老的那个槽位号");
-    hidkit_init(&g_cb);
+    hidkit_init();
 }
 
 /*--------------------------------------------------------------------+
@@ -663,7 +658,7 @@ static void test_nkro_two_byte_page_and_end_collection(void)
 
 int main(void)
 {
-    hidkit_init(&g_cb);
+    hidkit_init();
     printf("== hidkit 主机侧样本测试 ==\n");
     test_boot_keyboard();
     test_fixed_mouse();
