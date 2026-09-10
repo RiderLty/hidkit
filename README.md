@@ -152,8 +152,10 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 `-fsanitize=address,undefined,alignment`，所以未对齐访问（Cortex-M0 会 HardFault 的那类）
 在主机上就能被抓到。
 
-当前保留的行为缺陷见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)：第一版是**忠实移植**，
-缺陷单独一轮修，测试先固定住现有行为。
+已知问题与残余限制见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)：第一版是**忠实移植**，
+移植时故意保留的 5 条描述符解析缺陷现已修复，每条都补了样本用例把规范行为固定住
+（`tests/host/test_hidkit.c` 末节「缺陷修复样本」，在修复前的实现上会红）；
+仍未实现的部分（Push/Pop、描述符容量上限等）也逐条列在里面。
 
 ---
 
@@ -164,4 +166,4 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 移植时只做了三类改动：去掉平台依赖（Pico SDK 宏、应用侧的 core/makcu/授权逻辑）、
 统一事件出口与 code 空间、槽位管理归本库。
 
-**许可证待定**（尚未添加 LICENSE 文件）；确定前请勿直接用于商业分发。
+以 [MIT 许可证](LICENSE) 发布（Copyright (c) 2026 RiderLty）。

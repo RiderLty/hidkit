@@ -65,6 +65,7 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
     int32_t  glb_log_max     = 0;
     uint8_t  glb_report_size = 0;
     uint8_t  glb_report_count = 0;
+    uint8_t  cur_report_id    = 0;   // 当前 Report ID：字段各自记录（多 ID 描述符）
     uint16_t bit_offset       = 0;   // 累计位偏移（不含 Report ID 字节）
 
     // ---- 局部状态（Local items：Main item 之后复位）----
@@ -97,8 +98,14 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
 
         /*--- Global items ---*/
 
-        case 0x05:  // Usage Page (1B)
-            glb_usage_page = data[i++];
+        case 0x05: case 0x06:  // Usage Page（1B / 2B）
+            glb_usage_page = (uint16_t)read_unsigned(&data[i], sz);
+            i += sz;
+            break;
+
+        case 0x07:  // Usage Page (4B)：不支持该宽度 → 按规范复位，不沿用上一个 item 的旧值
+            glb_usage_page = 0;
+            i += sz;
             break;
 
         case 0x15: case 0x16: case 0x17:  // Logical Minimum
@@ -111,17 +118,41 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
             i += sz;
             break;
 
-        case 0x75:  // Report Size (1B)
-            glb_report_size = data[i++];
+        case 0x75: case 0x76:  // Report Size（1B / 2B）
+            glb_report_size = (uint8_t)read_unsigned(&data[i], sz);
+            i += sz;
             break;
 
-        case 0x85:  // Report ID (1B)
-            *report_id = data[i++];
+        case 0x77:  // Report Size (4B)：不支持 → 复位
+            glb_report_size = 0;
+            i += sz;
+            break;
+
+        case 0x85: case 0x86: {  // Report ID（1B / 2B）
+            // Report ID 规范上 ≤ 255：2 字节形式的高字节非零属非法，按"无 ID"处理
+            uint32_t rid = read_unsigned(&data[i], sz);
+            cur_report_id = (rid <= 0xFFu) ? (uint8_t)rid : 0;
+            // 主 Report ID 取首个非零（多 ID 描述符里各字段见 hid_field_t.report_id）
+            if (cur_report_id != 0 && *report_id == 0) *report_id = cur_report_id;
+            i += sz;
+            bit_offset = 0;      // 每个 Report ID 的位偏移空间独立
+            break;
+        }
+
+        case 0x87:  // Report ID (4B)：不支持 → 复位为"无 ID"
+            cur_report_id = 0;
+            i += sz;
             bit_offset = 0;
             break;
 
-        case 0x95:  // Report Count (1B)
-            glb_report_count = data[i++];
+        case 0x95: case 0x96:  // Report Count（1B / 2B）
+            glb_report_count = (uint8_t)read_unsigned(&data[i], sz);
+            i += sz;
+            break;
+
+        case 0x97:  // Report Count (4B)：不支持 → 复位
+            glb_report_count = 0;
+            i += sz;
             break;
 
         /*--- Local items ---*/
@@ -162,11 +193,16 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
                 bit_offset += (uint16_t)glb_report_size * count;
             } else if (loc_usage_count > 0) {
                 for (uint8_t j = 0; j < count && num_fields < max_fields; j++) {
+                    // HID 规范：usage 列表比 Report Count 少时，其余字段**重复最后一个** usage
+                    // （原来是 j % loc_usage_count 从头环绕复用，会把轴认成按键；已与
+                    //  NKRO 路径的语义对齐）
+                    uint8_t ui = (j < loc_usage_count) ? j : (uint8_t)(loc_usage_count - 1);
                     hid_field_t *f = &fields[num_fields++];
                     f->usage_page  = glb_usage_page;
-                    f->usage_id    = loc_usages[j % loc_usage_count];
+                    f->usage_id    = loc_usages[ui];
                     f->bit_offset  = bit_offset;
                     f->bit_size    = glb_report_size;
+                    f->report_id   = cur_report_id;
                     f->logical_min = glb_log_min;
                     f->logical_max = glb_log_max;
                     f->is_relative = is_rel;
@@ -175,20 +211,27 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
                 }
             } else if (loc_has_usage_range) {
                 uint32_t range = loc_usage_max - loc_usage_min + 1;
-                for (uint32_t j = 0; j < range && num_fields < max_fields; j++) {
+                // HID 规范：字段数由 Report Count 决定 —— 循环上界必须是 min(count, range)。
+                // 原来直接用 range，count < range 时 bit_offset 会多推进，
+                // 使**该字段之后的所有字段偏移全部错位**（与 NKRO 路径一致：多出的
+                // usage 视作 padding，不产生字段）
+                uint32_t n = ((uint32_t)count < range) ? (uint32_t)count : range;
+                for (uint32_t j = 0; j < n && num_fields < max_fields; j++) {
                     hid_field_t *f = &fields[num_fields++];
                     f->usage_page  = glb_usage_page;
                     f->usage_id    = (uint16_t)(loc_usage_min + j);
                     f->bit_offset  = bit_offset;
                     f->bit_size    = glb_report_size;
+                    f->report_id   = cur_report_id;
                     f->logical_min = glb_log_min;
                     f->logical_max = glb_log_max;
                     f->is_relative = is_rel;
                     f->is_constant = false;
                     bit_offset += glb_report_size;
                 }
-                if ((uint32_t)count > range) {
-                    bit_offset += (uint16_t)glb_report_size * (count - (uint8_t)range);
+                if ((uint32_t)count > n) {
+                    // range 之外的位仍是本字段的一部分（无 usage 可归），只推进偏移
+                    bit_offset += (uint16_t)glb_report_size * (uint8_t)((uint32_t)count - n);
                 }
             } else {
                 bit_offset += (uint16_t)glb_report_size * count;
@@ -207,8 +250,12 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
             loc_has_usage_range = false;
             break;
 
-        case 0xC0:  // End Collection
+        case 0xC0:  // End Collection（Main item：同样要复位局部状态）
             if (collection_depth > 0) collection_depth--;
+            // HID 规范：End Collection 清空局部 usage/usage-min/max，
+            // 否则集合结束后新开的 Input 会继承上一个集合的 usage 归属
+            loc_usage_count = 0;
+            loc_has_usage_range = false;
             break;
 
         default:
@@ -232,7 +279,6 @@ bool hid_mouse_parse(hid_mouse_desc_t *desc, const uint8_t *data, uint16_t len)
     desc->idx_x       = 0xFF;
     desc->idx_y       = 0xFF;
     desc->idx_wheel   = 0xFF;
-    desc->idx_buttons = 0xFF;
 
     // 调用共享字段解析器
     uint8_t report_id = 0;
@@ -259,8 +305,11 @@ bool hid_mouse_parse(hid_mouse_desc_t *desc, const uint8_t *data, uint16_t len)
             }
         }
         if (f->usage_page == HID_USAGE_PAGE_BUTTON) {
-            if (desc->idx_buttons == 0xFF) desc->idx_buttons = i;
-            desc->button_count++;
+            // 按键字段逐个记下标（多 Report ID 描述符里按键可能不与轴连续排列，
+            // 原来的"起始字段 + 个数"会连带把轴字段当成按键读）
+            if (desc->button_count < HID_MOUSE_MAX_BTNS) {
+                desc->btn_idx[desc->button_count++] = i;
+            }
         }
     }
 
@@ -321,6 +370,21 @@ int32_t hid_field_read(const hid_field_t *f,
  * 鼠标报告 dispatch
  *--------------------------------------------------------------------*/
 
+// 按字段自带的 Report ID 定位本次报文的数据体（不含 Report ID 字节）：
+// 字段不属于本报文时返回 NULL —— 多 Report ID 描述符里只有 ID 相符的那部分字段
+// 会随本报文更新（原来只认描述符最后一个 ID，其余 Report 的字段全读不到）
+static const uint8_t *mouse_field_body(const hid_field_t *f, const uint8_t *report,
+                                       uint16_t len, uint16_t *body_len)
+{
+    if (f->report_id != 0) {
+        if (len < 1 || report[0] != f->report_id) return NULL;
+        *body_len = (uint16_t)(len - 1);
+        return report + 1;
+    }
+    *body_len = len;   // 无 Report ID：整份报文即数据体
+    return report;
+}
+
 void HIDKIT_HOT(hid_mouse_dispatch)(int8_t slot, hid_mouse_dev_t *dev,
                         const uint8_t *report, uint16_t len)
 {
@@ -330,30 +394,24 @@ void HIDKIT_HOT(hid_mouse_dispatch)(int8_t slot, hid_mouse_dev_t *dev,
 
     const hid_mouse_desc_t *desc = &dev->desc;
 
-    // Report ID 校验
-    const uint8_t *field_data = report;
-    uint16_t field_len = len;
-    if (desc->report_id != 0) {
-        if (len < 1 || report[0] != desc->report_id) return;
-        field_data = report + 1;
-        field_len = len - 1;
-    }
-
     // ---- 按键边沿检测 ----
     // 注：下面两处以 8 为上限是 uint8_t 位掩码的宽度，不是 HIDKIT_MAX_MOUSE_BUTTONS
     // —— 描述符驱动的多键鼠标不能按后者截断，否则 6 键以上鼠标会丢键。
-    if (desc->idx_buttons != 0xFF && desc->button_count > 0) {
+    if (desc->button_count > 0) {
         uint8_t buttons = 0;
-        for (uint8_t i = 0; i < desc->button_count && i < 8; i++) {
-            const hid_field_t *f = &desc->fields[desc->idx_buttons + i];
-            if (hid_field_read(f, field_data, field_len)) {
-                buttons |= (uint8_t)(1u << i);
-            }
+        for (uint8_t i = 0; i < desc->button_count && i < HID_MOUSE_MAX_BTNS; i++) {
+            const hid_field_t *f = &desc->fields[desc->btn_idx[i]];
+            uint16_t blen;
+            const uint8_t *body = mouse_field_body(f, report, len, &blen);
+            // 字段不属于本报文时保持上次状态，避免别的 Report ID 的报文把它误判成"松开"
+            bool on = body ? (hid_field_read(f, body, blen) != 0)
+                           : ((dev->last_buttons >> i) & 1u) != 0;
+            if (on) buttons |= (uint8_t)(1u << i);
         }
 
         if (dev->initialized) {
             uint8_t changed = buttons ^ dev->last_buttons;
-            for (uint8_t bit = 0; bit < 8; bit++) {
+            for (uint8_t bit = 0; bit < HID_MOUSE_MAX_BTNS; bit++) {
                 if (changed & (1u << bit)) {
                     // hidkit：改用统一出口（鼠标段前缀 + 按键序号）
                     hidkit_emit_key(slot, (uint16_t)(HIDKIT_CODE_MOUSE | bit),
@@ -364,18 +422,19 @@ void HIDKIT_HOT(hid_mouse_dispatch)(int8_t slot, hid_mouse_dev_t *dev,
         dev->last_buttons = buttons;
     }
 
-    // ---- 轴移动 ----
-    int16_t x = 0, y = 0, wheel = 0;
-    if (desc->idx_x != 0xFF)
-        x = (int16_t)hid_field_read(&desc->fields[desc->idx_x], field_data, field_len);
-    if (desc->idx_y != 0xFF)
-        y = (int16_t)hid_field_read(&desc->fields[desc->idx_y], field_data, field_len);
-    if (desc->idx_wheel != 0xFF)
-        wheel = (int16_t)hid_field_read(&desc->fields[desc->idx_wheel], field_data, field_len);
+    // ---- 轴移动（X / Y / Wheel 各按自己的 Report ID 取数据）----
+    const uint8_t axis_idx[3] = { desc->idx_x, desc->idx_y, desc->idx_wheel };
+    int16_t axis[3] = { 0, 0, 0 };
+    for (uint8_t a = 0; a < 3; a++) {
+        if (axis_idx[a] == 0xFF) continue;
+        uint16_t blen;
+        const uint8_t *body = mouse_field_body(&desc->fields[axis_idx[a]], report, len, &blen);
+        if (body) axis[a] = (int16_t)hid_field_read(&desc->fields[axis_idx[a]], body, blen);
+    }
 
-    if (x != 0 || y != 0 || wheel != 0) {
+    if (axis[0] != 0 || axis[1] != 0 || axis[2] != 0) {
         // hidkit：改用统一出口
-        hidkit_emit_mouse_abs(slot, x, y, wheel);
+        hidkit_emit_mouse_abs(slot, axis[0], axis[1], axis[2]);
     }
 
     dev->initialized = true;
@@ -445,21 +504,48 @@ bool HIDKIT_HOT(hid_nkro_parse)(hid_nkro_desc_t *desc, const uint8_t *data, uint
 
         switch (prefix) {
 
-        case 0x05:  // Usage Page (1B)
-            glb_usage_page = data[i++];
+        case 0x05: case 0x06:  // Usage Page（1B / 2B）
+            glb_usage_page = (uint16_t)read_unsigned(&data[i], sz);
+            i += sz;
             break;
 
-        case 0x75:  // Report Size (1B)
-            glb_report_size = data[i++];
+        case 0x07:  // Usage Page (4B)：不支持 → 复位（与通用解析器同规则）
+            glb_usage_page = 0;
+            i += sz;
             break;
 
-        case 0x85:  // Report ID (1B)：各 Report 的位偏移空间独立
-            cur_report_id = data[i++];
+        case 0x75: case 0x76:  // Report Size（1B / 2B）
+            glb_report_size = (uint8_t)read_unsigned(&data[i], sz);
+            i += sz;
+            break;
+
+        case 0x77:  // Report Size (4B)：不支持 → 复位
+            glb_report_size = 0;
+            i += sz;
+            break;
+
+        case 0x85: case 0x86: {  // Report ID（1B / 2B）：各 Report 的位偏移空间独立
+            uint32_t rid = read_unsigned(&data[i], sz);
+            cur_report_id = (rid <= 0xFFu) ? (uint8_t)rid : 0;
+            i += sz;
+            bit_offset = 0;
+            break;
+        }
+
+        case 0x87:  // Report ID (4B)：不支持 → 复位为"无 ID"
+            cur_report_id = 0;
+            i += sz;
             bit_offset = 0;
             break;
 
-        case 0x95:  // Report Count (1B)
-            glb_report_count = data[i++];
+        case 0x95: case 0x96:  // Report Count（1B / 2B）
+            glb_report_count = (uint8_t)read_unsigned(&data[i], sz);
+            i += sz;
+            break;
+
+        case 0x97:  // Report Count (4B)：不支持 → 复位
+            glb_report_count = 0;
+            i += sz;
             break;
 
         case 0x09:  // Usage (1B)
@@ -555,6 +641,12 @@ bool HIDKIT_HOT(hid_nkro_parse)(hid_nkro_desc_t *desc, const uint8_t *data, uint
         case 0xA1:  // Collection（Main item：消耗并复位局部状态，
                     // 否则集合顶层的 Usage (Keyboard) 等会劫持后续 Input）
             i++;
+            loc_usage_count = 0;
+            loc_has_usage_range = false;
+            break;
+
+        case 0xC0:  // End Collection（同为 Main item：按规范清局部状态，
+                    // 否则集合结束后的 Input 会继承上一个集合的 usage）
             loc_usage_count = 0;
             loc_has_usage_range = false;
             break;

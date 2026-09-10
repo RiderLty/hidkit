@@ -27,6 +27,7 @@
 // hidkit：下面几个是本模块私有的容量常量，无对应的 HIDKIT_* 配置宏，保留原值
 #define HID_MOUSE_MAX_FIELDS   24   // 鼠标描述符最多字段数（展开后）
 #define HID_MOUSE_MAX_USAGES   8    // 单个 Input item 最多 usage 数
+#define HID_MOUSE_MAX_BTNS     8    // 鼠标按键数上限（= uint8_t 位掩码宽度，与 dispatch 的掩码一致）
 #define HID_PARSE_MAX_FIELDS   64   // 通用描述符解析器最多字段数
 
 /*--------------------------------------------------------------------+
@@ -81,6 +82,8 @@ typedef struct {
     uint16_t usage_id;      // Usage ID（如 0x30 = X 轴）
     uint16_t bit_offset;    // 在报告中的位偏移（不含 Report ID 字节）
     uint8_t  bit_size;      // 位宽（1~32）
+    uint8_t  report_id;     // 本字段所属的 Report ID（0 = 无 Report ID 前缀）
+                            // hidkit：多 Report ID 描述符按**字段各自**记录（原来全描述符只留最后一个）
     int32_t  logical_min;   // 逻辑最小值
     int32_t  logical_max;   // 逻辑最大值
     bool     is_relative : 1;  // 相对值（Relative）
@@ -91,14 +94,18 @@ typedef struct {
 typedef struct {
     hid_field_t fields[HID_MOUSE_MAX_FIELDS];
     uint8_t     num_fields;         // 实际字段数
-    uint8_t     report_id;          // 报告 ID（0 = 无 Report ID）
+    uint8_t     report_id;          // 描述符主 Report ID = 首个出现的非零 Report ID
+                                    // （0 = 整份描述符都没有 Report ID）
+                                    // 多 ID 描述符里各字段自己的 ID 见 hid_field_t.report_id
 
     // 预查索引（0xFF = 不存在），指向 fields[] 数组下标
     uint8_t     idx_x;              // X 轴字段
     uint8_t     idx_y;              // Y 轴字段
     uint8_t     idx_wheel;          // 滚轮字段
-    uint8_t     idx_buttons;        // 按键组起始字段
-    uint8_t     button_count;       // 按键个数
+    // 按键字段下标表（按下标顺序）。多 Report ID 描述符里按键可能不成组，
+    // 因此不像原来那样只记"起始字段 + 个数"。
+    uint8_t     btn_idx[HID_MOUSE_MAX_BTNS];
+    uint8_t     button_count;       // 按键个数（≤ HID_MOUSE_MAX_BTNS）
 } hid_mouse_desc_t;
 
 // 鼠标设备句柄 = 描述符 + 边沿检测状态
@@ -149,9 +156,9 @@ typedef struct {
  * 不关心 usage 含义，只记录字段元数据（偏移/位宽/逻辑范围/usage 等）。
  * 调用者自行对返回的 fields[] 做后处理索引。
  *
- * @param fields      输出：展开后的字段数组
+ * @param fields      输出：展开后的字段数组（每个字段自带所属 Report ID）
  * @param max_fields  数组容量
- * @param report_id   输出：报告 ID（0 = 无 Report ID 字节）
+ * @param report_id   输出：描述符主 Report ID = 首个非零 Report ID（0 = 无 Report ID 字节）
  * @param data        输入的 HID Report Descriptor 二进制数据
  * @param len         描述符长度（字节）
  * @return 字段数（0 表示解析失败或无双字段）
