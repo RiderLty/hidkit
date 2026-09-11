@@ -91,7 +91,9 @@ void gamepad_hid_umount(int8_t slot)
     memset(&g_gp[slot], 0, sizeof(gamepad_info_t));
 }
 
-bool gamepad_hid_dispatch(int8_t slot,
+// 每报文（SLOT_GAMEPAD 分支）。与键盘/鼠标/NKRO 的 dispatch 同级，标注也一致；
+// 它是热路径上唯一用函数指针调度的一环，指向下面的 ds5_parse / azeron_parse
+bool HIDKIT_HOT(gamepad_hid_dispatch)(int8_t slot,
                           const uint8_t *report, uint16_t len,
                           gamepad_state_t *out_state)
 {

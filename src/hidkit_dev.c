@@ -12,6 +12,7 @@
  */
 
 #include "hidkit.h"
+#include "hidkit_config.h"   // HIDKIT_HOT / 容量宏
 #include "hidkit_internal.h"
 #include "hidkit_hooks.h"
 #include "hidkit_debug.h"
@@ -84,7 +85,10 @@ void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
     hidkit_input_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
 }
 
-bool hidkit_slot_alive(int8_t slot)
+// 每份报文的第一个调用（hidkit_report 进来就查）。跨 TU 无法内联，所以在热
+// 路径标注这件事上它必须一起标 —— 只标下层 dispatch 而把这一句留在 flash，
+// 整条链照样会在 flash 写窗口里卡在第一次取指上
+bool HIDKIT_HOT(hidkit_slot_alive)(int8_t slot)
 {
     return slot >= 0 && slot < (int8_t)HIDKIT_MAX_SLOTS && s_slot[slot].kind != SLOT_FREE;
 }
@@ -270,7 +274,9 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
     return slot;
 }
 
-bool hidkit_report(int8_t slot, const uint8_t *buf, uint16_t len)
+// 每报文的公共入口：四个分支各自的下层 dispatch 都标了 HIDKIT_HOT，
+// 入口自己却是普通函数 —— 补上，否则热路径标注在第一次调用处就断了
+bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
 {
     if (!hidkit_slot_alive(slot) || !buf || len == 0) return false;
     slot_touch(slot);
@@ -364,7 +370,9 @@ static const uint16_t k_xinput_btn_map[18] = {
 /* 扳机 0..255 → 0..32767 */
 #define HIDKIT_XINPUT_TRIGGER_SCALE (32767 / 255)
 
-bool hidkit_xinput_report(int8_t slot, const hidkit_xinput_pad_t *pad)
+// XInput 路径的每报文入口（适配器 glue 每份报文调一次），与 hidkit_report 对称：
+// 一个走 HID 报文、一个走归一化后的 pad，两者都在输入热路径上
+bool HIDKIT_HOT(hidkit_xinput_report)(int8_t slot, const hidkit_xinput_pad_t *pad)
 {
 #if !HIDKIT_ENABLE_GAMEPAD
     (void)slot; (void)pad;

@@ -89,8 +89,20 @@
 /* #define HIDKIT_TICK_MS() my_millis() */
 
 /* ---- 平台标注 ---- */
-/* Pico 上可定义为 __not_in_flash_func(...) 之类把热路径放进 SRAM；
- * 默认展开为空，任何平台都能编译。 */
+/* 把**每报文都要跑**的函数放进 RAM（Pico 上主核写 flash 期间 XIP 停摆，
+ * 留在 flash 的函数会卡在这段窗口里）。标注范围是入口 + dispatch/parse 层；
+ * 挂载期解析描述符、查询类辅助函数不标。
+ *
+ * 默认展开为空，任何平台都能编译。展开式必须**连标识符一起吐出来**
+ * （属性 + 名字），与 SDK 的 __not_in_flash_func 同构 —— 只给属性不给名字
+ * 会在 `bool HIDKIT_HOT(foo)(int)` 处直接编译报错。static inline 的布局解析
+ * 函数也照标不误：它们地址被取走，必然发射出独立函数体。
+ *
+ *   #define HIDKIT_HOT(f) __not_in_flash_func(f)                            // Pico SDK
+ *   #define HIDKIT_HOT(f) __attribute__((section(".time_critical.hidkit"))) f // 裸属性
+ *
+ * 注意本库只能标自己这半边：热路径的最后一步是 host 侧实现的那几个
+ * hidkit_input_* 弱符号，它们要由宿主自己放进 RAM，整条链才真正不停摆。 */
 #ifndef HIDKIT_HOT
 #define HIDKIT_HOT
 #endif

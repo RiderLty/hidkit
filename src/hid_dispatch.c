@@ -31,7 +31,9 @@ static inline hid_edge_state_t *edge_of(int8_t slot)
 // 鼠标报文解析（mouse_report_x8, 8B 固定格式）
 //--------------------------------------------------------------------+
 
-void hid_dispatch_mouse(int8_t slot, const uint8_t *report, uint8_t len)
+// 与同文件的 hid_dispatch_keyboard 同形同位：boot 协议鼠标的每报文入口。
+// 本库内部不调它（走 hid_mouse_dispatch），但宿主可以直接调，标注保持一致
+void HIDKIT_HOT(hid_dispatch_mouse)(int8_t slot, const uint8_t *report, uint8_t len)
 {
     if (len != sizeof(mouse_report_x8)) return;
     hid_edge_state_t *st = edge_of(slot);

@@ -40,6 +40,16 @@ XInput（Xbox 手柄）的**协议知识**在这里（固定布局 + 归一化�
 - 需要"最久没有报文"这个判据时定义 `HIDKIT_TICK_MS()`（毫秒单调递增）；不定义就退化为
   "挤掉最先分配的槽位"，不需要任何时间函数。
 - Pico 上想把热路径放进 SRAM：定义 `HIDKIT_HOT` 为 `__not_in_flash_func(...)` 之类；默认展开为空。
+  标注范围是**每报文都要跑的入口 + dispatch/parse 层**（挂载期解析描述符、查询类辅助函数不标）。
+  展开式必须连标识符一起吐出来，与 SDK 的宏同构：
+
+  ```c
+  #define HIDKIT_HOT(f) __not_in_flash_func(f)                              // Pico SDK
+  #define HIDKIT_HOT(f) __attribute__((section(".time_critical.hidkit"))) f  // 裸属性
+  ```
+
+  注意这只能停摆**本库这半边**：热路径的最后一步是宿主实现的那几个 `hidkit_input_*`
+  弱符号，它们也得由宿主放进 RAM，整条链才真正不在 flash 写窗口里卡住。
 
 ---
 

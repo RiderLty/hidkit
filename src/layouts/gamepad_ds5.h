@@ -11,6 +11,7 @@
 #define GAMEPAD_DS5_H
 
 #include "gamepad.h"
+#include "hidkit_config.h"   // HIDKIT_HOT
 #include <string.h>
 
 #ifdef __cplusplus
@@ -132,7 +133,10 @@ static inline bool ds5_match(uint16_t vid, uint16_t pid)
 }
 
 // 解析 raw report → gamepad_state_t（无状态，每帧独立）
-static inline bool ds5_parse(const uint8_t *report, uint16_t len,
+// 每报文（经 gamepad.c 的函数指针调进来）。它是 static inline，但地址被
+// gp_lookup 取走，必然发射出独立函数体 —— 那个副本要跟着进 RAM，
+// 否则函数指针调用点仍落在 flash 上
+static inline bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
                               gamepad_state_t *out)
 {
     if (!report || !out) return false;
