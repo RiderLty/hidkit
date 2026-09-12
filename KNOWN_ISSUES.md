@@ -11,6 +11,12 @@
 `slot` 时加的守界误伤了探测调用），真机上表现为「手柄全部不认识」。两条同样按
 「先加用例、确认在修复前会红」的流程做。
 
+后来在一台「不被支持的全键无冲键盘」上（Compx 2.4G 接收器 `3554:fa09`：
+2 个 HID 接口，第二个接口谎报 `proto=Mouse`）又定位并修了两条（8、9）：
+第 8 条是**设备类型判定只看 `bInterfaceProtocol`**，第 9 条是
+**NKRO 数组段的松开漏检**（第 8 条把 boot 风格键盘改走描述符路径后暴露出来的
+既有缺陷）。
+
 ## 已修复
 
 ### 1. usage range 的循环上界用错（原影响最大）
@@ -147,6 +153,62 @@ gamepad_hid_mount(-1, dev->vid, dev->pid, ...)   /* -1 = 只探测，不占槽�
 - 为什么一直没被发现：样本测试里没有任何用例走"按 VID/PID 认领 HID 手柄"这条路径
   （`test_xinput` 只测归一化入口，注释里写着布局表"由真机回归覆盖"），于是这条
   路径只在真机上暴露。
+
+### 8. 设备类型只看 `bInterfaceProtocol`，复合接口的键盘集合被丢给鼠标解析器
+
+真机现象（Compx 2.4G 接收器 `3554:fa09`）：按 1..5 有键事件，第 6 键起（含 7 8 9 0）
+全部无输出。抓包显示该设备有两个接口：
+
+| 接口 | 描述符声明 | 实际集合 | 旧判定 |
+|---|---|---|---|
+| 0 | proto=Keyboard | 修饰键位图 + 5 槽键码数组 | boot 键盘，正常 |
+| 1 | **proto=Mouse** | 厂商 + Consumer + System + **Keyboard(ID 4, 160 bit NKRO)** + Mouse(ID 7) | 鼠标，键盘集合被丢 |
+
+旧 `hidkit_mount()` 先看 proto：`MOUSE → KIND_MOUSE`、`KEYBOARD → KIND_KB`，
+只有 `proto == 0` 才尝试 `hid_nkro_parse()`。于是接口 1 被挂成 `SLOT_MOUSE`，
+ID=4 的键盘报文进 `hid_mouse_dispatch()` 后不匹配任何鼠标字段 → 静默丢弃
+（`hidkit_report()` 仍返回 true，宿主的兜底 hexdump 也不会触发）。1..5 之所以正常，
+是因为它们走接口 0 的 boot 报表。
+
+- 修法：判定改为**描述符优先**。`hidkit_mount()` 只要拿到描述符就解析出**能力集**
+  （`CAP_KB_NKRO` / `CAP_MOUSE_DESC` / `CAP_GAMEPAD`），槽位保存能力位；
+  `hidkit_report()` 按报文首字节（Report ID）路由，键盘优先、其次鼠标。
+  `hid_nkro_accepts()` / `hid_mouse_accepts()` 是新增的路由判据。
+  proto 只在描述符缺失、或描述符里没有本库认识的集合时兜底。
+  已知手柄的 VID:PID 匹配仍排在描述符解析之前（手柄描述符里也有 Generic Desktop
+  X/Y + Button，否则会被误判成鼠标）；鼠标能力只在 `proto == MOUSE` 时认领，
+  避免把「未知手柄」的描述符当鼠标。
+- 顺带修掉的相关问题：`hid_mouse_parse()` 现在用字段过滤（只收 Generic Desktop /
+  Button 页）**不占字段槽地跳过**厂商/键盘集合。该接口原先把 19 个厂商字段 +
+  Consumer/System 字段塞满 `HID_MOUSE_MAX_FIELDS(24)`，后面的鼠标集合（ID 7）
+  根本轮不到，`idx_x/y/wheel` 全是 `0xFF` —— 即这个接口**当鼠标也是坏的**。
+  过滤后 `hid_mouse_parse()` 正确得到 X@8 / Y@24 / Wheel@40（ID 7 内偏移）。
+- 用例：`test_combo_mouse_nkro()`（`3554:fa09` 的 218 字节描述符 + 真机报文）
+  → 同一槽位上 ID=4 出键事件、ID=7 出鼠标事件、未解析的 Consumer 报文返回「未消费」。
+
+### 9. NKRO 数组段的松开漏检
+
+数组段（`Report Size 8` 的 keycode 数组，6KRO / boot 风格描述符）的报文只列出
+**当前按着的键**，松开的键不再出现。旧 `hid_nkro_dispatch()` 的数组分支只对本帧
+出现的 keycode 调 `nkro_key_edge()`：
+
+```c
+uint8_t kc = (uint8_t)hid_field_read(&f, body, body_len);
+nkro_key_edge(slot, dev, kc, kc != 0);   /* 消失的键不会被处理 */
+```
+
+于是按下 1..5 后松开 2，新报文里不再有 usage 0x1F，shadow 里该位却永远留着 ——
+上层再也等不到这支键的松开。位图段没这个问题（每个 bit 都显式给出 up/down）。
+
+这条缺陷在旧实现里被第 8 条掩盖着：boot 风格键盘当时走 `hid_dispatch_keyboard()`
+（集合比较，松开正确）。第 8 条改成描述符优先后，boot 风格描述符会走 NKRO 路径，
+缺陷立刻暴露（真机 itf0 松开 2~5 时无事件）。
+
+- 修法：数组段先收集本帧键码集合（`hid_nkro_dev_t.array_prev`，256 位位图），
+  再与上一帧集合做差：`now && !before` → 按下，`!now && before` → 松开。
+  位图段仍逐位即时处理；两段共用一个 shadow，重复键仍天然去重。
+- 用例：`test_nkro_array_release()`（真机 itf0 描述符：位图修饰键 + 5 槽数组）
+  → 松开 2~5 必须补发 4 个松开，且 Shift（位图段）不被数组去重误释放。
 
 ---
 

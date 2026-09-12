@@ -108,7 +108,14 @@ typedef struct {
 void hidkit_init(void);
 
 /*
- * 设备挂载：按 proto / 报告描述符 / VID:PID 表决定是否接管。
+ * 设备挂载：判定本库是否接管该接口。
+ *
+ * 判定是**描述符优先**的：只要拿到报告描述符，就按描述符解析出的能力集认领
+ * （键盘键位段 / 鼠标字段 / VID:PID 手柄布局），一个接口可以同时具备多种能力
+ * （多 Report ID 复合描述符）；bInterfaceProtocol 只在描述符缺失或描述符里没有
+ * 本库认识的集合时作兜底。因此把带 NKRO 集合、却谎报 proto=Mouse 的复合接口
+ * 交进来时，本库仍能正确路由报文。
+ *
  * 返回 >= 0：本库已接管，后续用该 slot 调用 hidkit_report / hidkit_umount。
  * 返回 HIDKIT_UNHANDLED：本库不认识该设备，宿主可自行处理（扩展点）。
  * 返回 HIDKIT_ERR_NO_SLOT：认识但槽位耗尽（策略为 DROP_NEW 时）。
@@ -117,7 +124,8 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev);
 
 /*
  * 收到报文：解析并触发回调。
- * 返回 true = 已消费；false = 未消费（该 slot 不属于本库，或该设备类型未启用）。
+ * 返回 true = 已消费；false = 未消费（该 slot 不属于本库，或该设备类型未启用，
+ * 或该接口虽已认领但这份报文的 Report ID 不属于任何已解析集合 —— 如厂商报表）。
  * 传入 len == 0 直接返回 false。
  */
 bool hidkit_report(int8_t slot, const uint8_t *buf, uint16_t len);

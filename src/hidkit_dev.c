@@ -1,11 +1,16 @@
 /*
  * hidkit 出口层：槽位管理 + 入口分发 + 事件出口。
  *
- * 这一层是唯一"知道设备类型怎么判定"的地方：
- *   - proto == MOUSE  → 解析鼠标报告描述符（固定格式报文兜底）
- *   - proto == KEYBOARD → boot 协议固定格式（无需描述符）
- *   - 其它（proto == 0）→ 先按 VID:PID 匹配已知手柄布局；不中再尝试 NKRO
- *                        键盘描述符；都不中则返回"未消费"交宿主处理
+ * 这一层是唯一"知道设备类型怎么判定"的地方。判定原则是**描述符优先**：
+ *   - 有报告描述符：解析出能力集（NKRO 键盘段 / 鼠标字段 / VID:PID 手柄布局），
+ *     同一个接口可以同时带多种集合（多 Report ID 复合描述符），槽位保存能力位，
+ *     报文按 Report ID 路由到对应解析器。
+ *   - 没有描述符（超过枚举缓冲 / 固定格式设备）：只能用 proto 兜底：
+ *     KEYBOARD → boot 固定格式、MOUSE → 固定 8 字节、GAMEPAD → 手柄布局表。
+ *
+ * 为什么不能只看 bInterfaceProtocol：HID 规范里协议字节只在 boot 子类下有意义，
+ * 且不少复合设备（如 2.4G 接收器）会把带 NKRO 键盘集合的接口声明成 Mouse。
+ * 旧实现因此把整份键盘集合丢给鼠标解析器，键事件被静默消费。
  *
  * 解析层（hid_parser / hid_dispatch / gamepad）不依赖任何平台 API，
  * 本层同样如此 —— 时间源与热路径标注都是可选宏。
@@ -35,8 +40,22 @@ typedef enum {
     SLOT_NKRO,
 } slot_kind_t;
 
+/* 槽位能力位：kind 只是"主类型"（供查询/日志），实际能吃什么报文由 caps 决定。
+ * 一个接口可能同时具备多种能力（多 Report ID 复合描述符）。 */
+enum {
+    CAP_MOUSE_DESC = 1u << 0,  /* 描述符鼠标   → hid_mouse_dispatch */
+    CAP_MOUSE_BOOT = 1u << 1,  /* 无描述符固定 8 字节鼠标 → hid_dispatch_mouse */
+    CAP_KB_NKRO    = 1u << 2,  /* 描述符键盘位段 → hid_nkro_dispatch（boot 描述符也能走） */
+    CAP_KB_BOOT    = 1u << 3,  /* 无描述符 boot 键盘 → hid_dispatch_keyboard */
+    CAP_GAMEPAD    = 1u << 4,  /* VID:PID 手柄布局 / 适配器通道 */
+};
+
+#define CAP_ANY_KB (CAP_KB_NKRO | CAP_KB_BOOT)
+#define CAP_ANY_MOUSE (CAP_MOUSE_DESC | CAP_MOUSE_BOOT)
+
 typedef struct {
     slot_kind_t kind;
+    uint8_t  caps;                         /* CAP_* 位 */
     uint16_t vid, pid;
     uint8_t  dev_addr, itf, proto;
     uint32_t last_buttons;                 /* 手柄按键边沿用 */
@@ -104,22 +123,17 @@ static void slot_clear(int8_t slot)
     memset(&s_nkro[slot], 0, sizeof(s_nkro[slot]));
 }
 
-static inline bool slot_is_kb(slot_kind_t k)
-{
-    return k == SLOT_KEYBOARD || k == SLOT_NKRO;
-}
-
 /* 释放一个槽位：先补发"全部抬起"，再清状态（卸载与挤出共用） */
 static void slot_release(int8_t slot)
 {
-    slot_kind_t const kind = s_slot[slot].kind;
+    uint8_t const caps = s_slot[slot].caps;
 
-    if (kind == SLOT_NKRO) {
+    if (caps & CAP_KB_NKRO) {
         hid_nkro_release_all(slot, &s_nkro[slot]);
     }
-    hid_dispatch_reset(slot);            /* boot 键鼠的补发松开 */
+    hid_dispatch_reset(slot);            /* boot 键鼠的补发松开（鼠标按键边沿也在这里） */
 
-    if (kind == SLOT_GAMEPAD) {
+    if (caps & CAP_GAMEPAD) {
         /* 手柄按键补发松开（按布局表查回 BTN_* 再走统一 key 出口），轴归零 */
         const uint16_t *map = s_slot[slot].btn_map;
         uint8_t count = s_slot[slot].btn_count;
@@ -132,8 +146,8 @@ static void slot_release(int8_t slot)
         hidkit_emit_gamepad_abs(slot, 0, 0, 0, 0, 0, 0);
     }
 
-    if (slot_is_kb(kind) && s_kb_count) s_kb_count--;
-    if (kind == SLOT_MOUSE && s_mouse_count) s_mouse_count--;
+    if ((caps & CAP_ANY_KB) && s_kb_count) s_kb_count--;
+    if ((caps & CAP_ANY_MOUSE) && s_mouse_count) s_mouse_count--;
 
     slot_clear(slot);
 }
@@ -195,32 +209,48 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
     if (!dev) return HIDKIT_UNHANDLED;
     const bool has_desc = (dev->report_desc && dev->report_desc_len > 0);
 
-    /* --- 先判定"本库是否认识这个设备"（不认识就不占槽位）--- */
-    enum { KIND_NONE, KIND_MOUSE, KIND_KB, KIND_GAMEPAD, KIND_NKRO } want = KIND_NONE;
+    /* --- 先判定能力集（不认识就不占槽位）--- */
+    uint8_t caps = 0;
 
-    if (dev->proto == HIDKIT_PROTO_MOUSE) {
-        want = KIND_MOUSE;
-    } else if (dev->proto == HIDKIT_PROTO_KEYBOARD) {
-        want = KIND_KB;                       /* boot 协议，固定格式 */
-    } else if (dev->proto == HIDKIT_PROTO_GAMEPAD) {
-        want = KIND_GAMEPAD;                  /* 适配器（如 XInput）已确认是手柄 */
-    } else if (has_desc) {
+    if (dev->proto == HIDKIT_PROTO_GAMEPAD) {
+        caps = CAP_GAMEPAD;                   /* 适配器（如 XInput）已确认是手柄 */
+    }
 #if HIDKIT_ENABLE_GAMEPAD
-        // 只做 VID:PID 查表（不占槽位）—— 槽位要在下面确认接管后才分配
-        if (gamepad_hid_match(dev->vid, dev->pid)) {
-            want = KIND_GAMEPAD;              /* 已知手柄布局（VID:PID 命中） */
-        } else
+    else if (dev->proto == HIDKIT_PROTO_NONE && has_desc &&
+             gamepad_hid_match(dev->vid, dev->pid)) {
+        /* 已知手柄布局（VID:PID 命中）。必须排在描述符解析之前：手柄描述符里
+         * 同样有 Generic Desktop X/Y/Button，先解析描述符会被误判成鼠标。 */
+        caps = CAP_GAMEPAD;
+    }
 #endif
-        {
-            hid_nkro_desc_t nd;
-            memset(&nd, 0, sizeof(nd));
-            if (hid_nkro_parse(&nd, dev->report_desc, dev->report_desc_len)) {
-                want = KIND_NKRO;             /* NKRO 键盘描述符命中 */
-            }
+    else if (has_desc) {
+        /* 描述符优先 —— bInterfaceProtocol 只作参考（复合设备常谎报 proto） */
+        hid_nkro_desc_t nd;
+        memset(&nd, 0, sizeof(nd));
+        if (hid_nkro_parse(&nd, dev->report_desc, dev->report_desc_len)) {
+            caps |= CAP_KB_NKRO;              /* 描述符里有键盘键位段 */
         }
+
+        /* proto 明确是 Mouse 就认领鼠标能力（即使描述符没解析出可用字段，
+         * 也与旧行为一致：走描述符路径消费报文，不会误用固定 8 字节格式）。
+         * proto==NONE 时不认领：未知手柄的描述符里也有 Generic Desktop X/Y +
+         * Button，认领会把手柄当鼠标。 */
+        if (dev->proto == HIDKIT_PROTO_MOUSE) {
+            caps |= CAP_MOUSE_DESC;
+        }
+
+        if (caps == 0) {
+            /* 描述符里没有本库认识的集合（或宿主只抓到了一部分）→ 回落到 proto。
+             * MOUSE 已在上面认领，走到这里的只可能是 KEYBOARD（描述符解析失败）。 */
+            if (dev->proto == HIDKIT_PROTO_KEYBOARD)      caps = CAP_KB_BOOT;
+        }
+    } else {
+        /* 无描述符（超过枚举缓冲 / 固定格式设备）：proto 是唯一线索 */
+        if (dev->proto == HIDKIT_PROTO_KEYBOARD)      caps = CAP_KB_BOOT;
+        else if (dev->proto == HIDKIT_PROTO_MOUSE)    caps = CAP_MOUSE_BOOT;
     }
 
-    if (want == KIND_NONE) {
+    if (caps == 0) {
         HIDKIT_LOG("hidkit: unhandled %04x:%04x proto=%u desc=%s\n",
                    dev->vid, dev->pid, (unsigned)dev->proto, has_desc ? "yes" : "none");
         return HIDKIT_UNHANDLED;
@@ -235,10 +265,11 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
     }
 
     slot_clear(slot);
-    s_slot[slot].kind = (want == KIND_MOUSE) ? SLOT_MOUSE
-                      : (want == KIND_KB)    ? SLOT_KEYBOARD
-                      : (want == KIND_NKRO)  ? SLOT_NKRO
-                                             : SLOT_GAMEPAD;
+    s_slot[slot].caps = caps;
+    s_slot[slot].kind = (caps & CAP_GAMEPAD)  ? SLOT_GAMEPAD
+                      : (caps & CAP_KB_NKRO)  ? SLOT_NKRO
+                      : (caps & CAP_KB_BOOT)  ? SLOT_KEYBOARD
+                                              : SLOT_MOUSE;
     s_slot[slot].vid = dev->vid;
     s_slot[slot].pid = dev->pid;
     s_slot[slot].dev_addr = dev->dev_addr;
@@ -246,31 +277,30 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
     s_slot[slot].proto = dev->proto;
     s_slot[slot].seq = ++s_alloc_seq;
 
-    /* --- 按类型做挂载期解析 --- */
-    if (want == KIND_MOUSE) {
-        if (has_desc) {
-            (void)hid_mouse_parse(&s_mouse[slot].desc, dev->report_desc,
-                                  dev->report_desc_len);
-        }
-        if (s_mouse_count < 255) s_mouse_count++;
-    } else if (want == KIND_KB) {
-        if (s_kb_count < 255) s_kb_count++;
-    } else if (want == KIND_GAMEPAD) {
+    /* --- 按能力做挂载期解析 --- */
+    if (caps & CAP_GAMEPAD) {
 #if HIDKIT_ENABLE_GAMEPAD
         (void)gamepad_hid_mount(slot, dev->vid, dev->pid, dev->report_desc,
                                 dev->report_desc_len);
 #endif
-    } else if (want == KIND_NKRO) {
+    }
+    if (caps & CAP_KB_NKRO) {
         (void)hid_nkro_parse(&s_nkro[slot].desc, dev->report_desc,
                              dev->report_desc_len);
-        if (s_kb_count < 255) s_kb_count++;
     }
+    if (caps & CAP_MOUSE_DESC) {
+        (void)hid_mouse_parse(&s_mouse[slot].desc, dev->report_desc,
+                              dev->report_desc_len);
+    }
+    if ((caps & CAP_ANY_KB) && s_kb_count < 255) s_kb_count++;
+    if ((caps & CAP_ANY_MOUSE) && s_mouse_count < 255) s_mouse_count++;
 
 #if defined(HIDKIT_TICK_MS)
     s_slot[slot].last_tick = (uint32_t)HIDKIT_TICK_MS();
 #endif
-    HIDKIT_LOG("hidkit: slot %d <- %04x:%04x proto=%u kind=%d\n",
-               slot, dev->vid, dev->pid, (unsigned)dev->proto, (int)s_slot[slot].kind);
+    HIDKIT_LOG("hidkit: slot %d <- %04x:%04x proto=%u kind=%d caps=0x%02X\n",
+               slot, dev->vid, dev->pid, (unsigned)dev->proto,
+               (int)s_slot[slot].kind, (unsigned)caps);
     return slot;
 }
 
@@ -281,20 +311,29 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
     if (!hidkit_slot_alive(slot) || !buf || len == 0) return false;
     slot_touch(slot);
 
-    switch (s_slot[slot].kind) {
-    case SLOT_MOUSE:
-        hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
-        return true;
+    uint8_t const caps = s_slot[slot].caps;
 
-    case SLOT_KEYBOARD:
-        hid_dispatch_keyboard(slot, buf, (uint8_t)len);
-        return true;
-
-    case SLOT_NKRO:
+    /* 一个接口可能带多种集合（多 Report ID 复合描述符）：按报文首字节
+     * （Report ID）路由。键盘优先于鼠标 —— 描述符里无 Report ID 且键鼠集合
+     * 共存时（罕见）按键盘处理，与既有"键盘优先"的直觉一致。 */
+    if ((caps & CAP_KB_NKRO) && hid_nkro_accepts(&s_nkro[slot], buf, len)) {
         hid_nkro_dispatch(slot, &s_nkro[slot], buf, len);
         return true;
+    }
+    if ((caps & CAP_MOUSE_DESC) && hid_mouse_accepts(&s_mouse[slot], buf, len)) {
+        hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
+        return true;
+    }
+    if (caps & CAP_KB_BOOT) {
+        hid_dispatch_keyboard(slot, buf, (uint8_t)len);
+        return true;
+    }
+    if (caps & CAP_MOUSE_BOOT) {
+        hid_dispatch_mouse(slot, buf, (uint8_t)len);
+        return true;
+    }
 
-    case SLOT_GAMEPAD: {
+    if (caps & CAP_GAMEPAD) {
 #if HIDKIT_ENABLE_GAMEPAD
         hidkit_gamepad_state_t gs;
         if (gamepad_hid_dispatch(slot, buf, len, &gs)) {
@@ -334,9 +373,14 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
 #endif
     }
 
-    default:
-        return false;
+    /* 认了设备，但这份报文（Report ID）不属于任何已解析集合（如厂商/Consumer
+     * 报表）→ 报"未消费"让宿主兜底。每个槽位只自证一次，避免逐帧刷屏。 */
+    if (!s_slot[slot].logged_unconsumed) {
+        s_slot[slot].logged_unconsumed = true;
+        HIDKIT_LOG("hidkit: slot %d report not consumed (len=%u, id=0x%02X)\n",
+                   slot, (unsigned)len, (unsigned)buf[0]);
     }
+    return false;
 }
 
 bool hidkit_umount(int8_t slot)

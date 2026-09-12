@@ -143,11 +143,20 @@ typedef struct {
 typedef struct {
     hid_nkro_desc_t desc;
     uint8_t last_keys[HIDKIT_NKRO_BYTES];   // hidkit：容量改由 HIDKIT_NKRO_BYTES 配置
+    uint8_t array_prev[HIDKIT_NKRO_BYTES];  // 数组段上一帧的键码集合（松开要靠新旧集合差检测）
 } hid_nkro_dev_t;
 
 /*--------------------------------------------------------------------+
  * API
  *--------------------------------------------------------------------*/
+
+/**
+ * @brief 字段保留回调（可选）：返回 false 的字段只推进位偏移、不占用 fields[] 槽位
+ *
+ * 用途：多集合接口（一个描述符里既有厂商集合又有鼠标集合）里，前面的集合可能
+ * 把字段表占满；用它能"跳过不关心的集合"，让后面的鼠标集合仍能被收录。
+ */
+typedef bool (*hid_field_keep_fn)(uint16_t usage_page, uint16_t usage_id);
 
 /**
  * @brief 通用 HID 报告描述符字段解析器（共享）
@@ -166,6 +175,18 @@ typedef struct {
 uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
                                  uint8_t *report_id,
                                  const uint8_t *data, uint16_t len);
+
+/**
+ * @brief 带字段过滤的通用描述符解析（keep == NULL 等价于 hid_parse_report_fields）
+ *
+ * 无论字段是否被保留，位偏移都按 Report Count/Size 推进 —— 被过滤掉的集合
+ * 不会让后续字段偏移错位。
+ */
+uint8_t hid_parse_report_fields_filtered(hid_field_t *fields, uint8_t max_fields,
+                                         uint8_t *report_id,
+                                         const uint8_t *data, uint16_t len,
+                                         hid_field_keep_fn keep);
+
 
 /**
  * @brief 解析鼠标 HID 报告描述符
@@ -207,6 +228,17 @@ void hid_mouse_dispatch(int8_t slot, hid_mouse_dev_t *dev,
                         const uint8_t *report, uint16_t len);
 
 /**
+ * @brief 这份报文是否属于本鼠标描述符（按字段的 Report ID 判定）
+ *
+ * 多集合/多 Report ID 接口上，host 用它在多个解析器之间路由：
+ *   - 描述符里的相关字段都没有 Report ID（0）→ 总返回 true（整份报文即数据体）
+ *   - 否则要求 len >= 1 且 report[0] 命中某个 X/Y/Wheel/按键字段的 Report ID
+ */
+bool hid_mouse_accepts(const hid_mouse_dev_t *dev,
+                       const uint8_t *report, uint16_t len);
+
+
+/**
  * @brief 解析 NKRO 键盘 HID 报告描述符
  *
  * 识别 Usage Page 0x07（Keyboard/Keypad）上的键位段：
@@ -235,6 +267,15 @@ bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len);
  * @param len    报告长度（字节）
  */
 void hid_nkro_dispatch(int8_t slot, hid_nkro_dev_t *dev, const uint8_t *report, uint16_t len);
+
+/**
+ * @brief 这份报文是否属于本 NKRO 描述符（按键位段的 Report ID 判定）
+ *
+ * 语义与 hid_mouse_accepts 对称：所有段都没有 Report ID → 总接受；
+ * 否则要求 report[0] 命中某个段的 Report ID。
+ */
+bool hid_nkro_accepts(const hid_nkro_dev_t *dev,
+                      const uint8_t *report, uint16_t len);
 
 /**
  * @brief 释放 NKRO 键盘 shadow 位图中仍按着的所有键（拔出时补发松开）
