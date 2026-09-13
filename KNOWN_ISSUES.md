@@ -176,15 +176,19 @@ ID=4 的键盘报文进 `hid_mouse_dispatch()` 后不匹配任何鼠标字段 �
   `hid_nkro_accepts()` / `hid_mouse_accepts()` 是新增的路由判据。
   proto 只在描述符缺失、或描述符里没有本库认识的集合时兜底。
   已知手柄的 VID:PID 匹配仍排在描述符解析之前（手柄描述符里也有 Generic Desktop
-  X/Y + Button，否则会被误判成鼠标）；鼠标能力只在 `proto == MOUSE` 时认领，
-  避免把「未知手柄」的描述符当鼠标。
+  X/Y + Button，否则会被误判成鼠标）；鼠标能力的认领条件是 `proto == MOUSE`
+  **或**描述符里有 Mouse/Pointer 顶层集合（`hid_desc_has_mouse_collection()`），
+  后者要求确实解析出鼠标字段 —— 这样「键盘 + 鼠标」复合接口即使只写
+  `proto=Keyboard/0` 也能拿到鼠标集合，而 Gamepad 集合不会被误判成鼠标。
 - 顺带修掉的相关问题：`hid_mouse_parse()` 现在用字段过滤（只收 Generic Desktop /
   Button 页）**不占字段槽地跳过**厂商/键盘集合。该接口原先把 19 个厂商字段 +
   Consumer/System 字段塞满 `HID_MOUSE_MAX_FIELDS(24)`，后面的鼠标集合（ID 7）
   根本轮不到，`idx_x/y/wheel` 全是 `0xFF` —— 即这个接口**当鼠标也是坏的**。
   过滤后 `hid_mouse_parse()` 正确得到 X@8 / Y@24 / Wheel@40（ID 7 内偏移）。
 - 用例：`test_combo_mouse_nkro()`（`3554:fa09` 的 218 字节描述符 + 真机报文）
-  → 同一槽位上 ID=4 出键事件、ID=7 出鼠标事件、未解析的 Consumer 报文返回「未消费」。
+  → 同一槽位上 ID=4 出键事件、ID=7 出鼠标事件、未解析的 Consumer 报文返回「未消费」；
+  `test_combo_kb_mouse_single_itf()`（`proto=Keyboard` + 键盘 ID=1 / 鼠标 ID=2）
+  → 键鼠都出事件，且 Gamepad 集合的描述符仍返回未消费。
 
 ### 9. NKRO 数组段的松开漏检
 

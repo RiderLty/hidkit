@@ -189,6 +189,16 @@ uint8_t hid_parse_report_fields_filtered(hid_field_t *fields, uint8_t max_fields
 
 
 /**
+ * @brief 描述符是否声明了鼠标（顶层 Application Collection 为 Mouse/Pointer）
+ *
+ * 用于复合设备判定：「键盘 + 鼠标」同接口时，接口的 bInterfaceProtocol 往往
+ * 只写 Keyboard（或 0），不能据此放弃鼠标集合。只看 X/Y/Button 字段又不够——
+ * 手柄描述符里同样有这些字段，故以顶层集合 usage（Generic Desktop 0x02/0x01）
+ * 为判据。
+ */
+bool hid_desc_has_mouse_collection(const uint8_t *data, uint16_t len);
+
+/**
  * @brief 解析鼠标 HID 报告描述符
  *
  * @param desc  输出：解析结果

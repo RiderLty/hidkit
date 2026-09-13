@@ -962,6 +962,83 @@ static void test_nkro_array_release(void)
     CHECK(g_key[g_key_n - 1].pressed == false, "卸载应补发剩余按下键的松开");
 }
 
+/* 单接口「键盘 + 鼠标」复合描述符（多 Report ID）：
+ *   键盘 ID=1（4 位位图）、鼠标 ID=2（3 键 + X/Y）。
+ * 带宏/鼠标模拟的键盘常见这种形态，接口 proto 往往只写 Keyboard 甚至 0。 */
+static const uint8_t k_combo_kb_mouse_desc[] = {
+    0x05,0x01, 0x09,0x06, 0xA1,0x01,              /* Keyboard (Application) */
+    0x85,0x01,                                    /*   Report ID (1) */
+    0x05,0x07, 0x19,0x04, 0x29,0x07,              /*   Usage 4..7 */
+    0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x04, 0x81,0x02,  /* 位图 */
+    0x95,0x04, 0x75,0x01, 0x81,0x01,              /*   padding */
+    0xC0,
+    0x05,0x01, 0x09,0x02, 0xA1,0x01,              /* Mouse (Application) */
+    0x85,0x02,                                    /*   Report ID (2) */
+    0x09,0x01, 0xA1,0x00,                         /*   Pointer (Physical) */
+    0x05,0x09, 0x19,0x01, 0x29,0x03,              /*   3 buttons */
+    0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x03, 0x81,0x02,
+    0x95,0x01, 0x75,0x05, 0x81,0x01,              /*   padding */
+    0x05,0x01, 0x09,0x30, 0x09,0x31,              /*   X, Y */
+    0x15,0x81, 0x25,0x7F, 0x75,0x08, 0x95,0x02, 0x81,0x06,
+    0xC0, 0xC0,
+};
+
+static void test_combo_kb_mouse_single_itf(void)
+{
+    printf("单接口键盘+鼠标复合（proto=Keyboard 也要认出鼠标集合）\n");
+
+    /* 手柄描述符（Gamepad 顶层集合）不应被当成鼠标 */
+    static const uint8_t k_pad_desc[] = {
+        0x05,0x01, 0x09,0x05, 0xA1,0x01,
+        0x09,0x30, 0x09,0x31, 0x15,0x00, 0x26,0xFF,0x00,
+        0x75,0x08, 0x95,0x02, 0x81,0x02, 0xC0,
+    };
+    CHECK(hid_desc_has_mouse_collection(k_combo_kb_mouse_desc,
+                                        sizeof(k_combo_kb_mouse_desc)),
+          "键盘+鼠标复合描述符应识别出 Mouse 顶层集合");
+    CHECK(!hid_desc_has_mouse_collection(k_pad_desc, sizeof(k_pad_desc)),
+          "Gamepad 顶层集合不应被识别成鼠标");
+    /* 真机 3554:fa09 接口 1 的 Mouse(ID 7) 集合也应被识别 */
+    CHECK(hid_desc_has_mouse_collection(k_compx_itf1_desc, sizeof(k_compx_itf1_desc)),
+          "真机复合描述符应识别出 Mouse 顶层集合");
+
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x0bad, .pid = 0x0010, .dev_addr = 16, .itf = 0,
+                               .proto = HIDKIT_PROTO_KEYBOARD,
+                               .report_desc = k_combo_kb_mouse_desc,
+                               .report_desc_len = sizeof(k_combo_kb_mouse_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管该复合接口，得到 %d", slot);
+
+    /* ID=1 键盘位图：bit0 → usage 0x04 */
+    const uint8_t kb[] = { 0x01, 0x01 };
+    CHECK(hidkit_report(slot, kb, sizeof(kb)), "ID=1 键盘报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04) &&
+          g_key[0].pressed, "应出键盘 0x04 按下，实得 %d 个事件", g_key_n);
+
+    /* ID=2 鼠标：按钮 + X/Y */
+    const uint8_t m0[] = { 0x02, 0x00, 0x00, 0x00 };
+    hidkit_report(slot, m0, sizeof(m0));            /* 首帧建基线 */
+    int const n0 = g_key_n;
+    const uint8_t m1[] = { 0x02, 0x01, 0x05, 0xFB }; /* 左键 + X=5, Y=-5 */
+    CHECK(hidkit_report(slot, m1, sizeof(m1)), "ID=2 鼠标报文应被消费");
+    CHECK(g_key_n == n0 + 1 &&
+          g_key[g_key_n - 1].code == (HIDKIT_CODE_MOUSE | 0) &&
+          g_key[g_key_n - 1].pressed, "应出鼠标左键按下");
+    CHECK(g_mouse.dx == 5 && g_mouse.dy == -5,
+          "位移应为 (5,-5)，实得 (%d,%d)", g_mouse.dx, g_mouse.dy);
+
+    hidkit_umount(slot);
+
+    /* 未知手柄（proto=NONE + Gamepad 集合、不在 VID:PID 表）不应被认领 */
+    hidkit_dev_info_t pad = { .vid = 0x0bad, .pid = 0x0011, .dev_addr = 17, .itf = 0,
+                              .proto = HIDKIT_PROTO_NONE,
+                              .report_desc = k_pad_desc,
+                              .report_desc_len = sizeof(k_pad_desc) };
+    CHECK(hidkit_mount(&pad) == HIDKIT_UNHANDLED,
+          "Gamepad 集合且非已知手柄 → 不应认领成鼠标");
+}
+
 int main(void)
 {
     hidkit_init();
@@ -982,6 +1059,7 @@ int main(void)
     test_parser_zero_report_count();
     test_combo_mouse_nkro();
     test_nkro_array_release();
+    test_combo_kb_mouse_single_itf();
     printf("\n结果：%d 通过，%d 失败\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

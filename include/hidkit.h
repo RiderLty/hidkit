@@ -112,9 +112,10 @@ void hidkit_init(void);
  *
  * 判定是**描述符优先**的：只要拿到报告描述符，就按描述符解析出的能力集认领
  * （键盘键位段 / 鼠标字段 / VID:PID 手柄布局），一个接口可以同时具备多种能力
- * （多 Report ID 复合描述符）；bInterfaceProtocol 只在描述符缺失或描述符里没有
- * 本库认识的集合时作兜底。因此把带 NKRO 集合、却谎报 proto=Mouse 的复合接口
- * 交进来时，本库仍能正确路由报文。
+ * （多 Report ID 复合描述符，典型如「键盘 + 鼠标」复合的带宏键盘）；bInterfaceProtocol
+ * 只在描述符缺失或描述符里没有本库认识的集合时作兜底。鼠标能力按 proto==Mouse
+ * 或描述符里的 Mouse/Pointer 顶层集合认领，因此把带 NKRO / 鼠标集合、却谎报
+ * proto 的复合接口交进来时，本库仍能正确路由报文。
  *
  * 返回 >= 0：本库已接管，后续用该 slot 调用 hidkit_report / hidkit_umount。
  * 返回 HIDKIT_UNHANDLED：本库不认识该设备，宿主可自行处理（扩展点）。

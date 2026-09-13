@@ -204,6 +204,13 @@ void hidkit_init(void)
     s_mouse_count = 0;
 }
 
+/* 鼠标描述符是否真的解析出了可用字段（避免只凭"有 Mouse 集合"就空认领） */
+static bool mouse_desc_usable(const hid_mouse_desc_t *d)
+{
+    return d->idx_x != 0xFF || d->idx_y != 0xFF || d->idx_wheel != 0xFF ||
+           d->button_count > 0;
+}
+
 int8_t hidkit_mount(const hidkit_dev_info_t *dev)
 {
     if (!dev) return HIDKIT_UNHANDLED;
@@ -231,11 +238,19 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
             caps |= CAP_KB_NKRO;              /* 描述符里有键盘键位段 */
         }
 
-        /* proto 明确是 Mouse 就认领鼠标能力（即使描述符没解析出可用字段，
-         * 也与旧行为一致：走描述符路径消费报文，不会误用固定 8 字节格式）。
-         * proto==NONE 时不认领：未知手柄的描述符里也有 Generic Desktop X/Y +
-         * Button，认领会把手柄当鼠标。 */
-        if (dev->proto == HIDKIT_PROTO_MOUSE) {
+        /* 鼠标能力的认领：proto 明确是 Mouse，或描述符里有 Mouse/Pointer 顶层集合
+         * （键盘+鼠标复合接口常只写 proto=Keyboard/0）。后者要求确实解析出鼠标
+         * 字段，避免空认领。proto==NONE 且描述符像手柄（Joystick/Gamepad 集合）
+         * 时这里不会命中 —— 未知手柄不会被误判成鼠标。 */
+        bool mouse_like = (dev->proto == HIDKIT_PROTO_MOUSE);
+        if (!mouse_like &&
+            hid_desc_has_mouse_collection(dev->report_desc, dev->report_desc_len)) {
+            hid_mouse_desc_t md;
+            memset(&md, 0, sizeof(md));
+            mouse_like = hid_mouse_parse(&md, dev->report_desc, dev->report_desc_len) &&
+                         mouse_desc_usable(&md);
+        }
+        if (mouse_like) {
             caps |= CAP_MOUSE_DESC;
         }
 

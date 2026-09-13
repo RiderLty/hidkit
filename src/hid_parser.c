@@ -286,6 +286,77 @@ uint8_t hid_parse_report_fields(hid_field_t *fields, uint8_t max_fields,
  * 鼠标描述符解析
  *--------------------------------------------------------------------*/
 
+// 扫描描述符的**顶层 Application Collection** usage，判断它是否声明了鼠标。
+//
+// 为什么要看集合而不是只看 X/Y/Button：手柄的描述符里也有 Generic Desktop
+// X/Y + Button 页，只看字段会把未知手柄误判成鼠标。Mouse/Pointer 顶层集合
+// （Generic Desktop 页 usage 0x02/0x01）才是有鼠标能力的可靠标志。
+bool hid_desc_has_mouse_collection(const uint8_t *data, uint16_t len)
+{
+    if (!data || len == 0) return false;
+
+    uint16_t glb_page     = 0;
+    uint32_t loc_usage    = 0;
+    bool     loc_has_usage = false;
+    int      depth         = 0;
+
+    for (uint16_t i = 0; i < len; ) {
+        uint8_t prefix = data[i++];
+
+        if (prefix == 0xFE) {          // 长 item：跳过
+            if (i >= len) break;
+            uint8_t sz = data[i++];
+            if (i + sz > len) break;
+            i += sz;
+            continue;
+        }
+
+        uint8_t sz = ITEM_DATA_SIZE(prefix);
+        if (i + sz > len) break;
+
+        switch (prefix) {
+        case 0x05: case 0x06: case 0x07:   // Usage Page（1B / 2B / 4B）
+            glb_page = (uint16_t)read_unsigned(&data[i], sz);
+            i += sz;
+            break;
+
+        case 0x09: case 0x0A: case 0x0B:   // Usage（1B / 2B / 4B）
+            loc_usage    = read_unsigned(&data[i], sz);
+            loc_has_usage = true;
+            i += sz;
+            break;
+
+        case 0xA1: {                       // Collection
+            uint8_t type = data[i++];
+            if (depth == 0 && type == HID_COLLECTION_APPLICATION && loc_has_usage &&
+                glb_page == HID_USAGE_PAGE_GENERIC_DESKTOP &&
+                (loc_usage == HID_USAGE_DESKTOP_POINTER ||
+                 loc_usage == HID_USAGE_DESKTOP_MOUSE)) {
+                return true;
+            }
+            depth++;
+            loc_has_usage = false;         // 集合消费掉 local usage
+            break;
+        }
+
+        case 0xC0:                         // End Collection
+            if (depth > 0) depth--;
+            loc_has_usage = false;
+            break;
+
+        default:
+            // 其他 Main item（Input/Output/Feature）同样消费 local usage
+            if ((prefix & 0xFC) == 0x80 || (prefix & 0xFC) == 0x90 ||
+                (prefix & 0xFC) == 0xB0) {
+                loc_has_usage = false;
+            }
+            i += sz;
+            break;
+        }
+    }
+    return false;
+}
+
 // 鼠标只关心两类集合：Generic Desktop（X/Y/Wheel）与 Button。
 // 其余集合（厂商 0xFFxx / Consumer / Keyboard 等）只推进位偏移、不占字段槽 ——
 // 多集合接口里厂商+键盘集合可能展开上百个字段，不滤掉的话后面的鼠标集合
