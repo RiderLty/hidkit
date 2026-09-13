@@ -57,7 +57,7 @@
   复位）、`k_desc_two_byte_report_id`（2B Report ID = 9）、NKRO 侧的
   `k_nkro_desc_two_byte_page`（2B Usage Page 声明 Keyboard 页 —— 修复前整条描述符
   识别不出键盘，`hid_nkro_parse` 直接返回 false）。
-- 仍未实现：`Push(0xA4)` / `Pop(0xB4)` 全局状态栈（见文末）。
+- `Push(0xA4)` / `Pop(0xB4)` 在后续「解析增强」里补上了（此前只跳过）。
 
 ### 4. `0xC0 End Collection` 不清 local 状态
 
@@ -89,10 +89,10 @@
     按起始下标顺序取会连带把轴字段当成按键读。
 - 用例：`k_desc_multi_report_id`（ID=1 = 按键 + X/Y，ID=2 = 滚轮）→ 两个 Report
   都要能解析；修复前 ID=1 的报文被整份丢弃（`report_id` 只留了 2）。
-- 仍然存在的限制：某个 usage 在多个 Report ID 里各定义一份时，
-  `idx_x/idx_y/idx_wheel` 只指向**第一个**匹配字段，其余 Report 的该轴不解析
-  （丢事件，不会读错值）；鼠标按键上限仍是 8（`uint8_t` 位掩码宽度，
-  `HID_MOUSE_MAX_BTNS`），与修复前一致。
+- 后续增强（见文末「解析增强」）：`hid_mouse_dispatch()` 改为**逐字段扫描**后，
+  同一 usage 在多个 Report ID 里各定义一份的情况已覆盖（每个字段按自己的
+  Report ID 取数）；`idx_x/idx_y/idx_wheel` 退化为查询用的首个命中下标。
+  鼠标按键上限仍是 8（`uint8_t` 位掩码宽度，`HID_MOUSE_MAX_BTNS`）。
 
 ---
 
@@ -216,6 +216,46 @@ nkro_key_edge(slot, dev, kc, kc != 0);   /* 消失的键不会被处理 */
 
 ---
 
+## 解析增强（对照成熟实现）
+
+以下几条不是真机缺陷，而是对照成熟实现（Linux `hid-input` 的逐字段模型、
+BTstack HID Parser 的单遍 usage 迭代器、hidrd 的 item 覆盖）补齐/改进的解析行为。
+每条都有回归用例，且在增强前的实现上会红。
+
+### A. 键鼠共用同一 Report ID 时并行解析
+
+一个接口可能把键位段与鼠标字段放在**同一个 Report ID** 里（带宏的键盘常见）。
+旧路由是"键盘优先"，同一份报文只会交给 `hid_nkro_dispatch()`，鼠标那半边被吃掉。
+现在当两种能力都由**显式 Report ID** 命中时，两份解析器各按自己的位偏移并行处理
+（对齐 Linux 逐字段模型）；没有 Report ID 的歧义报文仍按键盘优先，避免把键盘
+报文当鼠标轴读。
+判据：`hid_nkro_uses_report_id()` / `hid_mouse_uses_report_id()`。
+用例：`test_combo_same_report_id`。
+
+### B. 鼠标轴改为逐字段扫描（支持多个鼠标集合）
+
+`hid_mouse_dispatch()` 原来靠 `idx_x/idx_y/idx_wheel`（每个轴只记**第一个**匹配
+字段，见第 5 条旧限制）。现在按键、位移都按**字段自身的 usage + Report ID** 取数，
+同一接口里两个鼠标集合（各自 Report ID）都能解析，轴值按字段累加。
+用例：`test_multi_mouse_report_ids`。
+
+### C. `Report Count` 用 16 位（支持 256 位全键位图）
+
+`Report Count`（`0x95`/`0x96`）原来读进 `uint8_t`，2 字节形式的 **256** 会被截断成 0
+→ NKRO 位图段整个丢失。现在计数与 `hid_nkro_span_t.count` 都是 16 位，
+`0x96 00 01`（256）能正确展开成 usage `0x04..0xFF`。
+用例：`test_nkro_report_count_256`（bit255 → usage 0xFF）。
+
+### D. `Push(0xA4)` / `Pop(0xB4)` 全局状态栈
+
+这两个 Main item 原来只被跳过，于是 "Push → 改 Usage Page → Pop" 的描述符在 Pop
+之后仍沿用改过的页，后续字段归属错乱。两条解析路径（通用字段解析 + NKRO）都补上了
+全局状态栈（Usage Page / Report Size / Report Count / Report ID / Logical Min/Max，
+深度 4）。行为对齐 hidrd / Linux。
+用例：`test_parser_push_pop`。
+
+---
+
 ## 另外几处不是缺陷、但值得知道
 
 - **固定 8 字节鼠标路径**（`hid_dispatch_mouse`）只接受 `len == 8`；这是设备侧固定
@@ -223,8 +263,6 @@ nkro_key_edge(slot, dev, kc, kc != 0);   /* 消失的键不会被处理 */
 - **鼠标无描述符时静默丢弃**：`proto == MOUSE` 但 `report_desc == NULL`（描述符超过宿主
   枚举缓冲）时，本库仍会接管该设备，但不产生事件。宿主可用
   `hidkit_mount()` 的返回值与 `hidkit_is_active()` 自行决定要不要走兜底格式。
-- **`Push(0xA4)` / `Pop(0xB4)` 未实现**：这两个 item 目前只被跳过，不做全局状态压栈/
-  恢复（罕用；带 Push/Pop 的描述符里，Push 之后的全局改动不会在 Pop 处还原）。
 - **描述符容量**：通用解析器最多 `HID_PARSE_MAX_FIELDS`(64) 个字段、鼠标
-  `HID_MOUSE_MAX_FIELDS`(24) 个字段，字段数触顶后 `bit_offset` 停止累加（后续字段
-  偏移会错）——超长的第三方描述符仍可能踩到，与移植前的行为一致。
+  `HID_MOUSE_MAX_FIELDS`(24) 个字段；字段数触顶后不再收录，但位偏移仍按
+  Report Count/Size 继续推进（增强后不再"停止累加"），后续字段偏移不会错。

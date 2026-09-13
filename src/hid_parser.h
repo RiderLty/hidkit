@@ -127,7 +127,7 @@ typedef struct {
 typedef struct {
     uint16_t bit_offset;   // 报告内位偏移（不含 Report ID 字节）
     uint8_t  usage_min;    // 位图段起始 keycode（数组段未用）
-    uint8_t  count;        // 位图段：位数；数组段：槽数
+    uint16_t count;        // 位图段：位数；数组段：槽数（16 位，兼容 256 位全键位图）
     uint8_t  bit_size;     // 1 = 位图段；8 = 数组段（字节值即 keycode）
     uint8_t  report_id;    // 该段所属 Report ID（0 = 无 Report ID）
 } hid_nkro_span_t;
@@ -247,6 +247,15 @@ void hid_mouse_dispatch(int8_t slot, hid_mouse_dev_t *dev,
 bool hid_mouse_accepts(const hid_mouse_dev_t *dev,
                        const uint8_t *report, uint16_t len);
 
+/**
+ * @brief 本鼠标描述符的相关字段（X/Y/Wheel/按键）是否带显式 Report ID
+ *
+ * 路由用：同一接口同时有键盘与鼠标能力、且二者都由同一个显式 Report ID 命中时，
+ * 两份解析器必须**并行**处理同一报文（对齐 Linux hid-input 的逐字段模型）；
+ * 而没有 Report ID 的歧义报文仍按键盘优先。
+ */
+bool hid_mouse_uses_report_id(const hid_mouse_dev_t *dev);
+
 
 /**
  * @brief 解析 NKRO 键盘 HID 报告描述符
@@ -286,6 +295,12 @@ void hid_nkro_dispatch(int8_t slot, hid_nkro_dev_t *dev, const uint8_t *report, 
  */
 bool hid_nkro_accepts(const hid_nkro_dev_t *dev,
                       const uint8_t *report, uint16_t len);
+
+/**
+ * @brief 本 NKRO 描述符的键位段是否带显式 Report ID（语义与
+ *        hid_mouse_uses_report_id 对称）
+ */
+bool hid_nkro_uses_report_id(const hid_nkro_dev_t *dev);
 
 /**
  * @brief 释放 NKRO 键盘 shadow 位图中仍按着的所有键（拔出时补发松开）

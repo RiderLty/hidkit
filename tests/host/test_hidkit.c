@@ -1039,6 +1039,192 @@ static void test_combo_kb_mouse_single_itf(void)
           "Gamepad 集合且非已知手柄 → 不应认领成鼠标");
 }
 
+/* 键鼠共用同一个显式 Report ID(1)：键盘 4 位位图 @0..3、鼠标 2 键 @8..9、
+ * X/Y @16/24。这种布局里"键盘优先"会吃掉鼠标那半边，必须并行解析。 */
+static const uint8_t k_combo_same_id_desc[] = {
+    0x05,0x01, 0x09,0x06, 0xA1,0x01,              /* Keyboard (Application) */
+    0x85,0x01,                                    /*   Report ID (1) */
+    0x05,0x07, 0x19,0x04, 0x29,0x07,              /*   Usage 4..7 */
+    0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x04, 0x81,0x02,  /* 键位图 @0..3 */
+    0x95,0x04, 0x75,0x01, 0x81,0x01,              /*   padding @4..7 */
+    0xC0,
+    0x05,0x01, 0x09,0x02, 0xA1,0x01,              /* Mouse (Application)，同一 ID */
+    0x05,0x09, 0x19,0x01, 0x29,0x02,              /*   2 buttons @8..9 */
+    0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x02, 0x81,0x02,
+    0x95,0x06, 0x75,0x01, 0x81,0x01,              /*   padding @10..15 */
+    0x05,0x01, 0x09,0x30, 0x09,0x31,              /*   X @16, Y @24 */
+    0x15,0x81, 0x25,0x7F, 0x75,0x08, 0x95,0x02, 0x81,0x06,
+    0xC0,
+};
+
+static void test_combo_same_report_id(void)
+{
+    printf("键鼠共用同一 Report ID：两份解析器并行处理\r\n");
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x0bad, .pid = 0x0020, .dev_addr = 18, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_combo_same_id_desc,
+                               .report_desc_len = sizeof(k_combo_same_id_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管该复合接口，得到 %d", slot);
+
+    /* ID=1：bit0 → 键 0x04；鼠标首帧只建基线 */
+    const uint8_t r1[] = { 0x01, 0x01, 0x00, 0x00, 0x00 };
+    CHECK(hidkit_report(slot, r1, sizeof(r1)), "ID=1 报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04),
+          "键 0x04 应按下，实得 %d 个事件", g_key_n);
+
+    /* 同一份报文里：键 0x05 新按下 + 鼠标左键按下 → 必须各出一个事件 */
+    const uint8_t r2[] = { 0x01, 0x03, 0x01, 0x00, 0x00 };
+    CHECK(hidkit_report(slot, r2, sizeof(r2)), "ID=1 键鼠混合报文应被消费");
+    CHECK(g_key_n == 3, "键+鼠标应各一个事件，实得 %d 个", g_key_n);
+    CHECK(g_key[1].code == (HIDKIT_CODE_KEYBOARD | 0x05) && g_key[1].pressed,
+          "先出键盘 0x05 按下，实得 0x%04X", g_key[1].code);
+    CHECK(g_key[2].code == (HIDKIT_CODE_MOUSE | 0) && g_key[2].pressed,
+          "再出鼠标左键按下，实得 0x%04X", g_key[2].code);
+
+    /* 同一 ID 里的鼠标轴也要出 */
+    const uint8_t r3[] = { 0x01, 0x03, 0x00, 0x05, 0xFB };
+    hidkit_report(slot, r3, sizeof(r3));
+    CHECK(g_mouse.dx == 5 && g_mouse.dy == -5,
+          "同一 ID 的鼠标位移应为 (5,-5)，实得 (%d,%d)", g_mouse.dx, g_mouse.dy);
+
+    hidkit_umount(slot);
+}
+
+/* 两个鼠标集合、不同 Report ID(7/8)：逐字段扫描后第二个集合也要能解析 */
+static const uint8_t k_two_mice_desc[] = {
+    0x05,0x01, 0x09,0x02, 0xA1,0x01, 0x85,0x07,   /* Mouse #1, ID 7 */
+    0x05,0x09, 0x19,0x01, 0x29,0x03, 0x15,0x00, 0x25,0x01,
+    0x75,0x01, 0x95,0x03, 0x81,0x02, 0x95,0x01, 0x75,0x05, 0x81,0x01,
+    0x05,0x01, 0x09,0x30, 0x09,0x31, 0x15,0x81, 0x25,0x7F,
+    0x75,0x08, 0x95,0x02, 0x81,0x06, 0x09,0x38, 0x95,0x01, 0x81,0x06,
+    0xC0,
+    0x05,0x01, 0x09,0x02, 0xA1,0x01, 0x85,0x08,   /* Mouse #2, ID 8 */
+    0x05,0x09, 0x19,0x01, 0x29,0x03, 0x15,0x00, 0x25,0x01,
+    0x75,0x01, 0x95,0x03, 0x81,0x02, 0x95,0x01, 0x75,0x05, 0x81,0x01,
+    0x05,0x01, 0x09,0x30, 0x09,0x31, 0x15,0x81, 0x25,0x7F,
+    0x75,0x08, 0x95,0x02, 0x81,0x06, 0x09,0x38, 0x95,0x01, 0x81,0x06,
+    0xC0,
+};
+
+static void test_multi_mouse_report_ids(void)
+{
+    printf("同接口两个鼠标集合（不同 Report ID）：逐字段扫描\r\n");
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x0bad, .pid = 0x0021, .dev_addr = 19, .itf = 0,
+                               .proto = HIDKIT_PROTO_MOUSE,
+                               .report_desc = k_two_mice_desc,
+                               .report_desc_len = sizeof(k_two_mice_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管双鼠标接口，得到 %d", slot);
+
+    /* ID=7 建基线 + 出位移 */
+    const uint8_t b7[] = { 0x07, 0x00, 0x00, 0x00, 0x00 };
+    hidkit_report(slot, b7, sizeof(b7));
+    const uint8_t m7[] = { 0x07, 0x00, 0x05, 0xFB, 0x01 };
+    hidkit_report(slot, m7, sizeof(m7));
+    CHECK(g_mouse.dx == 5 && g_mouse.dy == -5 && g_mouse.wheel == 1,
+          "ID=7 应为 (5,-5,1)，实得 (%d,%d,%d)", g_mouse.dx, g_mouse.dy, g_mouse.wheel);
+
+    /* ID=8：旧实现只认第一个 X/Y 字段（ID=7），这份报文会被丢弃 */
+    const uint8_t b8[] = { 0x08, 0x00, 0x00, 0x00, 0x00 };
+    CHECK(hidkit_report(slot, b8, sizeof(b8)), "ID=8 报文应被消费");
+    const uint8_t m8[] = { 0x08, 0x00, 0x07, 0x03, 0x02 };
+    hidkit_report(slot, m8, sizeof(m8));
+    CHECK(g_mouse.dx == 7 && g_mouse.dy == 3 && g_mouse.wheel == 2,
+          "ID=8 应为 (7,3,2)，实得 (%d,%d,%d)", g_mouse.dx, g_mouse.dy, g_mouse.wheel);
+
+    hidkit_umount(slot);
+}
+
+/* Report Count 用 2 字节形式声明 256：旧实现 (uint8_t) 截断成 0 → 整段丢失 */
+static const uint8_t k_nkro_count_256_desc[] = {
+    0x05,0x01, 0x09,0x06, 0xA1,0x01,
+    0x85,0x01,
+    0x05,0x07, 0x15,0x00, 0x25,0x01, 0x19,0x00, 0x29,0xFF,
+    0x75,0x01, 0x96,0x00,0x01,              /* Report Count (256) */
+    0x81,0x02,
+    0xC0,
+};
+
+static void test_nkro_report_count_256(void)
+{
+    printf("NKRO：Report Count 256（2 字节形式）不被截断\r\n");
+    hid_nkro_desc_t nd;
+    CHECK(hid_nkro_parse(&nd, k_nkro_count_256_desc, sizeof(k_nkro_count_256_desc)),
+          "Report Count 256 应解析成功");
+    CHECK(nd.num_spans == 1, "应只有 1 个键位段，实得 %u", (unsigned)nd.num_spans);
+    CHECK(nd.spans[0].usage_min == 0x04 && nd.spans[0].count == 252 &&
+          nd.spans[0].bit_offset == 4,
+          "应覆盖 usage 0x04..0xFF（252 位），实得 min=0x%02X count=%u off=%u",
+          (unsigned)nd.spans[0].usage_min, (unsigned)nd.spans[0].count,
+          (unsigned)nd.spans[0].bit_offset);
+
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x04d9, .pid = 0xa295, .dev_addr = 20, .itf = 1,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_nkro_count_256_desc,
+                               .report_desc_len = sizeof(k_nkro_count_256_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管为 NKRO 键盘，得到 %d", slot);
+
+    uint8_t rpt[33];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x01;        /* Report ID */
+    rpt[32] = 0x80;       /* bit 255 → usage 0xFF */
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0xFF) &&
+          g_key[0].pressed,
+          "bit255 应产生 usage 0xFF 按下，实得 %d 个事件", g_key_n);
+    hidkit_umount(slot);
+}
+
+/* Push(0xA4)/Pop(0xB4)：Pop 之后 Usage Page 必须恢复为 Push 时的值，
+ * 否则后面的 X/Y 会归到 Button 页（0x09），idx_x/y 命不中。 */
+static const uint8_t k_desc_push_pop[] = {
+    0x05,0x01, 0x09,0x02, 0xA1,0x01,              /* Mouse (Application) */
+    0x09,0x01, 0xA1,0x00,                         /* Pointer (Physical) */
+    0xA4,                                         /*   Push（保存 page=0x01） */
+    0x05,0x09, 0x19,0x01, 0x29,0x03,              /*   切到 Button 页 */
+    0x15,0x00, 0x25,0x01, 0x75,0x01, 0x95,0x03, 0x81,0x02,
+    0x95,0x01, 0x75,0x05, 0x81,0x01,
+    0xB4,                                         /*   Pop（恢复 page=0x01） */
+    0x09,0x30, 0x09,0x31,                         /*   X @8, Y @16（依赖 Pop 恢复） */
+    0x15,0x81, 0x25,0x7F, 0x75,0x08, 0x95,0x02, 0x81,0x06,
+    0xC0, 0xC0,
+};
+
+static void test_parser_push_pop(void)
+{
+    printf("描述符解析：Push/Pop 全局状态栈\r\n");
+    hid_mouse_desc_t d;
+    CHECK(hid_mouse_parse(&d, k_desc_push_pop, sizeof(k_desc_push_pop)),
+          "应解析成功");
+    CHECK(d.idx_x != 0xFF && d.idx_y != 0xFF,
+          "Pop 后 Usage Page 应恢复，X/Y 应命中（实得 %u,%u）",
+          (unsigned)d.idx_x, (unsigned)d.idx_y);
+    if (d.idx_x != 0xFF && d.idx_y != 0xFF) {   /* 避免上面失败时越界读 fields[] */
+        CHECK_FIELD(d.fields[d.idx_x], 0x01, 0x30, 8);
+        CHECK_FIELD(d.fields[d.idx_y], 0x01, 0x31, 16);
+    }
+
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x0bad, .pid = 0x0030, .dev_addr = 21, .itf = 0,
+                               .proto = HIDKIT_PROTO_MOUSE,
+                               .report_desc = k_desc_push_pop,
+                               .report_desc_len = sizeof(k_desc_push_pop) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管鼠标，得到 %d", slot);
+    const uint8_t r0[] = { 0x00, 0x00, 0x00 };
+    hidkit_report(slot, r0, sizeof(r0));            /* 首帧建基线 */
+    const uint8_t r1[] = { 0x00, 0x05, 0xFB };
+    hidkit_report(slot, r1, sizeof(r1));
+    CHECK(g_mouse.dx == 5 && g_mouse.dy == -5,
+          "位移应为 (5,-5)，实得 (%d,%d)", g_mouse.dx, g_mouse.dy);
+    hidkit_umount(slot);
+}
+
 int main(void)
 {
     hidkit_init();
@@ -1060,6 +1246,10 @@ int main(void)
     test_combo_mouse_nkro();
     test_nkro_array_release();
     test_combo_kb_mouse_single_itf();
+    test_combo_same_report_id();
+    test_multi_mouse_report_ids();
+    test_nkro_report_count_256();
+    test_parser_push_pop();
     printf("\n结果：%d 通过，%d 失败\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

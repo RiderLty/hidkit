@@ -329,13 +329,28 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
     uint8_t const caps = s_slot[slot].caps;
 
     /* 一个接口可能带多种集合（多 Report ID 复合描述符）：按报文首字节
-     * （Report ID）路由。键盘优先于鼠标 —— 描述符里无 Report ID 且键鼠集合
-     * 共存时（罕见）按键盘处理，与既有"键盘优先"的直觉一致。 */
-    if ((caps & CAP_KB_NKRO) && hid_nkro_accepts(&s_nkro[slot], buf, len)) {
+     * （Report ID）路由。 */
+    bool const kb_ok = (caps & CAP_KB_NKRO) &&
+                       hid_nkro_accepts(&s_nkro[slot], buf, len);
+    bool const ms_ok = (caps & CAP_MOUSE_DESC) &&
+                       hid_mouse_accepts(&s_mouse[slot], buf, len);
+
+    /* 键鼠共用一个显式 Report ID（同一份报文里既有键位段又有鼠标字段）：
+     * 两份解析器各自按自己的位偏移处理本报文 —— 对齐 Linux hid-input 的
+     * 逐字段模型，不能"键盘优先"把鼠标那半边吃掉。
+     * 只有二者都由显式 Report ID 命中时才并行；没有 Report ID 的描述符里
+     * 键鼠报文无法区分，仍按键盘优先（否则会把键盘报文当鼠标轴读）。 */
+    if (kb_ok && ms_ok && hid_nkro_uses_report_id(&s_nkro[slot]) &&
+        hid_mouse_uses_report_id(&s_mouse[slot])) {
+        hid_nkro_dispatch(slot, &s_nkro[slot], buf, len);
+        hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
+        return true;
+    }
+    if (kb_ok) {
         hid_nkro_dispatch(slot, &s_nkro[slot], buf, len);
         return true;
     }
-    if ((caps & CAP_MOUSE_DESC) && hid_mouse_accepts(&s_mouse[slot], buf, len)) {
+    if (ms_ok) {
         hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
         return true;
     }
