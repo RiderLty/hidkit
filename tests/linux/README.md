@@ -82,7 +82,14 @@ sudo ./hidkit_hidraw 3554:fa09 6      # 6 秒；第 3 个参数可指定 proto
   身份用稳定的 USB 接口路径，所以 `hidrawN` 号复用不会误判成同一设备。
 - 一个物理设备（含多接口接收器）的每个接口各占一个 hidkit slot；同一接口上的键鼠集合
   由 hidkit 按 Report ID 路由，共用同一 ID 时并行解析。
-- 真实鼠标 1kHz，默认把位移按 100ms 聚合打印（`--mouse-ms N` 调整，`0` = 每份都打）。
+- **按键不打节流**：`hidkit_input_key` 里是立刻 `printf` + `fflush`。唯一做聚合的是
+  **鼠标位移**——默认按 100ms 合并成一行（`--mouse-ms N` 调整，`0` = 每份都打）。
+  若怀疑有延迟，用 `--ts` 给 `[RX]/[EV]` 打上 `CLOCK_MONOTONIC` 时间戳自行对比：
+  rp5 上实测（gadget 注入到打印）按键端到端 **0.08~1.02ms（中位 0.55ms）**。
+  真机上感觉"慢/跳"通常来自：`--raw` 在鼠标 1kHz 时刷屏把终端拖住、SSH 终端的
+  渲染延迟、或设备自身的 `bInterval`（内核 usbhid 轮询）；都不是解析路径的开销。
+- 热插拔对账每轮只走 sysfs；报告描述符是**按需读取**（新设备/`--list` 时才 `open`+ioctl），
+  不会给读报文的循环添抖动。
 - Linux 侧额外因素（内核可能切 boot protocol、input 子系统、hidraw 权限）只在这台
   主机上存在；hidkit 的目标平台仍是嵌入式 host 栈，这里只是"同一个解析路径的真机输入"。
 

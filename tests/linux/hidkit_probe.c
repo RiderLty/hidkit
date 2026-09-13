@@ -26,6 +26,7 @@
  *   --raw               打印每份原始报文
  *   --dump-desc         新挂载时打印报告描述符逐 item 解析
  *   --mouse-ms N        鼠标位移聚合打印间隔毫秒（默认 100；0 = 每份都打）
+ *   --ts                给 [RX]/[EV] 打 CLOCK_MONOTONIC 毫秒时间戳（测延迟）
  */
 
 #define _GNU_SOURCE
@@ -44,6 +45,7 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <time.h>
 #include <linux/hidraw.h>
 
 #include "hidkit.h"
@@ -234,12 +236,23 @@ static int enumerate(itf_t *out, int max)
         const char *ip = strstr(phys, "input");
         t->input_idx = ip ? atoi(ip + 5) : -1;
 
-        t->desc_len = sizeof(t->desc);
-        t->desc_ok = read_report_desc(t->dev, t->desc, &t->desc_len);
+        /* 描述符按需读取（见 load_desc）：热插拔每轮对账只走 sysfs，
+         * 不再对每个设备做 open+ioctl，避免给读报文的路径添抖动 */
+        t->desc_len = 0;
+        t->desc_ok = false;
         n++;
     }
     closedir(d);
     return n;
+}
+
+/* 按需取报告描述符（连接建立时/--list 时各读一次） */
+static bool load_desc(itf_t *t)
+{
+    if (t->desc_ok) return true;
+    t->desc_len = sizeof(t->desc);
+    t->desc_ok = read_report_desc(t->dev, t->desc, &t->desc_len);
+    return t->desc_ok;
 }
 
 static void groupify(const itf_t *itf, int nitf, group_t *grp, int *ngrp)
@@ -402,6 +415,19 @@ static int g_nkey, g_nmouse_move, g_nmouse_btn, g_ngp;
 static int32_t g_acc_dx, g_acc_dy, g_acc_wheel;
 static struct timeval g_last_mouse;
 static int g_mouse_ms = 100;
+static bool g_ts;   /* --ts：给 [RX]/[EV] 打 CLOCK_MONOTONIC 毫秒时间戳 */
+
+static double now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+static void ts_prefix(void)
+{
+    if (g_ts) printf("[%12.3f] ", now_ms());
+}
 
 static const char *key_name(uint8_t u)
 {
@@ -469,6 +495,7 @@ static const char *mouse_btn_name(uint8_t b)
 static void flush_mouse(void)
 {
     if (g_acc_dx == 0 && g_acc_dy == 0 && g_acc_wheel == 0) return;
+    ts_prefix();
     printf("[EV] MOUSE move dx=%d dy=%d wheel=%d\n", g_acc_dx, g_acc_dy, g_acc_wheel);
     fflush(stdout);
     g_acc_dx = g_acc_dy = g_acc_wheel = 0;
@@ -481,12 +508,15 @@ void hidkit_input_key(int8_t slot, uint16_t code, bool pressed)
     uint8_t  v = (uint8_t)(code & 0xFF);
     if (seg == HIDKIT_CODE_MOUSE) {
         g_nmouse_btn++;
+        ts_prefix();
         printf("[EV] slot=%d MOUSE %s %s\n", slot, mouse_btn_name(v), pressed ? "down" : "up");
     } else if (seg == HIDKIT_CODE_GAMEPAD) {
         g_nkey++;
+        ts_prefix();
         printf("[EV] slot=%d PAD btn=0x%02X %s\n", slot, v, pressed ? "down" : "up");
     } else {
         g_nkey++;
+        ts_prefix();
         printf("[EV] slot=%d KEY %-10s (0x%02X) %s\n", slot, key_name(v), v, pressed ? "down" : "up");
     }
     fflush(stdout);
@@ -512,6 +542,7 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                               int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
 {
     g_ngp++;
+    ts_prefix();
     printf("[EV] slot=%d PAD ls=(%d,%d) rs=(%d,%d) lt=%d rt=%d\n",
            slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
     fflush(stdout);
@@ -519,6 +550,7 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid)
 {
+    ts_prefix();
     printf("[EV] slot=%d DROPPED %04x:%04x\n", slot, vid, pid);
     fflush(stdout);
 }
@@ -606,7 +638,7 @@ static const itf_t *find_by_key(const itf_t *cur, int n, const char *key)
     return NULL;
 }
 
-static void do_attach(const itf_t *t, int proto, bool dump)
+static void do_attach(itf_t *t, int proto, bool dump)
 {
     active_t *a = active_free_slot();
     if (!a) {
@@ -622,6 +654,8 @@ static void do_attach(const itf_t *t, int proto, bool dump)
     a->vid = t->vid;
     a->pid = t->pid;
     a->used = true;   /* 先占位：即使下面失败也不再重复打印 */
+
+    (void)load_desc(t);   /* 只有新设备才读描述符 */
 
     char desc[192];
     describe(t, desc, sizeof(desc));
@@ -663,7 +697,7 @@ static void do_attach(const itf_t *t, int proto, bool dump)
 }
 
 /* 对账：新出现 → attach；消失 → detach */
-static void reconcile(const itf_t *cur, int ncur, const filter_t *f,
+static void reconcile(itf_t *cur, int ncur, const filter_t *f,
                       int proto, bool dump)
 {
     for (int i = 0; i < MAX_ACTIVE; i++) {
@@ -699,9 +733,8 @@ static void reconcile(const itf_t *cur, int ncur, const filter_t *f,
  * 选择与列表
  *--------------------------------------------------------------------*/
 
-static void list_groups(const itf_t *itf, const group_t *grp, int ngrp)
+static void list_groups(itf_t *itf, const group_t *grp, int ngrp)
 {
-    (void)itf;
     if (ngrp == 0) {
         printf("没有找到 HID 设备（/dev/hidraw* 需要 root；若刚插上可稍等重试）\n");
         return;
@@ -710,7 +743,8 @@ static void list_groups(const itf_t *itf, const group_t *grp, int ngrp)
         printf("[%d] %04x:%04x  %-28s  %d 个 HID 接口\n",
                g, grp[g].vid, grp[g].pid, grp[g].name, grp[g].n);
         for (int k = 0; k < grp[g].n; k++) {
-            const itf_t *t = &itf[grp[g].idx[k]];
+            itf_t *t = &itf[grp[g].idx[k]];
+            (void)load_desc(t);   /* --list 才读描述符 */
             char desc[192];
             describe(t, desc, sizeof(desc));
             printf("      %-14s iface~%d bInterfaceProtocol=%d desc=%s\n",
@@ -733,6 +767,7 @@ static void usage(const char *argv0)
     printf("  --raw              打印原始报文\n");
     printf("  --dump-desc        新挂载时打印描述符逐 item 解析\n");
     printf("  --mouse-ms N       鼠标位移聚合间隔毫秒（默认 100，0=每份）\n");
+    printf("  --ts               给 [RX]/[EV] 打 CLOCK_MONOTONIC 毫秒时间戳（测延迟）\n");
 }
 
 static bool resolve_index_filter(const itf_t *itf, int nitf, const char *index,
@@ -775,6 +810,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--list")) do_list = true;
         else if (!strcmp(argv[i], "--raw")) do_raw = true;
         else if (!strcmp(argv[i], "--dump-desc")) do_dump = true;
+        else if (!strcmp(argv[i], "--ts")) g_ts = true;
         else if (!strcmp(argv[i], "--vidpid") && i + 1 < argc) vidpid = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--index") && i + 1 < argc) index = argv[++i];
@@ -869,12 +905,16 @@ int main(int argc, char **argv)
                 if (!FD_ISSET(a->fd, &rf)) continue;
                 uint8_t buf[512];
                 ssize_t n = read(a->fd, buf, sizeof(buf));
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                    continue;   /* 非阻塞空读：不是拔出，别误卸载 */
+                }
                 if (n <= 0) {
                     /* ENODEV/0 = 设备已拔出；下一轮对账也会兜住 */
                     do_detach(a, n == 0 ? "读结束" : "读错误/已拔出");
                     continue;
                 }
                 if (do_raw) {
+                    ts_prefix();
                     printf("[RX] slot=%d len=%d data=", a->slot, (int)n);
                     for (ssize_t x = 0; x < n; x++) printf("%02X", buf[x]);
                     printf("\n");
