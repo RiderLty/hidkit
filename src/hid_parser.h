@@ -256,6 +256,15 @@ bool hid_mouse_accepts(const hid_mouse_dev_t *dev,
  */
 bool hid_mouse_uses_report_id(const hid_mouse_dev_t *dev);
 
+/**
+ * @brief 释放鼠标 shadow 里仍按着的按键（拔出/卸载时补发松开）
+ *
+ * hid_mouse_dispatch 用的是 hid_mouse_dev_t.last_buttons，与 boot 鼠标的
+ * hid_dispatch_reset 不是同一份状态 —— 卸载时必须显式调用，否则按住鼠标键
+ * 拔掉设备，上层永远等不到松开。
+ */
+void hid_mouse_release_all(int8_t slot, hid_mouse_dev_t *dev);
+
 
 /**
  * @brief 解析 NKRO 键盘 HID 报告描述符

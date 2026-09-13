@@ -1225,6 +1225,31 @@ static void test_parser_push_pop(void)
     hidkit_umount(slot);
 }
 
+/* 描述符鼠标的按键状态在 s_mouse 里，卸载必须走 hid_mouse_release_all；
+ * 真机 gadget 验证时发现按着鼠标键拔设备会漏"松开" */
+static void test_mouse_umount_release(void)
+{
+    printf("描述符鼠标：卸载应补发按住的鼠标键\r\n");
+    ev_reset();
+    hidkit_dev_info_t d = { .vid = 0x046d, .pid = 0xc078, .dev_addr = 22, .itf = 0,
+                            .proto = HIDKIT_PROTO_MOUSE,
+                            .report_desc = k_mouse_desc,
+                            .report_desc_len = sizeof(k_mouse_desc) };
+    int8_t slot = hidkit_mount(&d);
+    CHECK(slot >= 0, "应接管鼠标，得到 %d", slot);
+
+    const uint8_t r0[] = { 0x00, 0x00, 0x00, 0x00 };
+    hidkit_report(slot, r0, sizeof(r0));            /* 首帧建基线 */
+    const uint8_t r1[] = { 0x01, 0x00, 0x00, 0x00 };/* 左键按下 */
+    hidkit_report(slot, r1, sizeof(r1));
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_MOUSE | 0) && g_key[0].pressed,
+          "左键应按下，实得 %d 个事件", g_key_n);
+
+    hidkit_umount(slot);
+    CHECK(g_key_n == 2 && g_key[1].code == (HIDKIT_CODE_MOUSE | 0) && !g_key[1].pressed,
+          "卸载应补发左键松开，实得 %d 个事件", g_key_n);
+}
+
 int main(void)
 {
     hidkit_init();
@@ -1250,6 +1275,7 @@ int main(void)
     test_multi_mouse_report_ids();
     test_nkro_report_count_256();
     test_parser_push_pop();
+    test_mouse_umount_release();
     printf("\n结果：%d 通过，%d 失败\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

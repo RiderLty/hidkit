@@ -650,6 +650,19 @@ bool HIDKIT_HOT(hid_mouse_uses_report_id)(const hid_mouse_dev_t *dev)
     return false;
 }
 
+void HIDKIT_HOT(hid_mouse_release_all)(int8_t slot, hid_mouse_dev_t *dev)
+{
+    if (slot < 0 || slot >= (int8_t)HIDKIT_MAX_SLOTS) return;
+    if (!dev) return;
+    // last_buttons 的 bit i 对应 btn_idx[i]，与 dispatch 的编码一致
+    for (uint8_t i = 0; i < HID_MOUSE_MAX_BTNS; i++) {
+        if (dev->last_buttons & (uint8_t)(1u << i)) {
+            hidkit_emit_key(slot, (uint16_t)(HIDKIT_CODE_MOUSE | i), false);
+        }
+    }
+    dev->last_buttons = 0;
+}
+
 /*--------------------------------------------------------------------+
  * NKRO 键盘描述符解析 + dispatch
  *

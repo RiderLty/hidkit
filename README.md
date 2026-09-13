@@ -202,12 +202,16 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 `-fsanitize=address,undefined,alignment`，所以未对齐访问（Cortex-M0 会 HardFault 的那类）
 在主机上就能被抓到。
 
+真机验证（可选，需要 Linux + USB gadget 回环，如树莓派 5）：`tests/linux/` 用
+ConfigFS 造出真机描述符的 HID 设备，在**真实 USB 枚举**下跑 hidkit 并断言事件，
+见 [`tests/linux/README.md`](tests/linux/README.md)。
+
 已知问题与残余限制见 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)：第一版是**忠实移植**，
 移植时故意保留的 5 条描述符解析缺陷现已修复，每条都补了样本用例把规范行为固定住
 （`tests/host/test_hidkit.c` 末节「缺陷修复样本」，在修复前的实现上会红）；
-移植完成后又修了两条（`Report Count = 0` 的规范符合性、以及一处**移植引入的回归**：
-HID 手柄布局表曾被槽位守界挡住探测调用而恒不命中），同样各带回归用例；
-仍未实现的部分（Push/Pop、描述符容量上限等）也逐条列在里面。
+移植完成后又修了 `Report Count = 0`、一处移植回归（手柄布局表恒不命中）、
+真机复合设备的分类/数组松开，以及一套对照成熟实现（Linux `hid-input`、hidrd 等）
+的解析增强，末尾还列了仍未实现的部分（描述符容量上限等）。
 
 ---
 

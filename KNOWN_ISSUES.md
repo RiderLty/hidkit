@@ -214,6 +214,31 @@ nkro_key_edge(slot, dev, kc, kc != 0);   /* 消失的键不会被处理 */
 - 用例：`test_nkro_array_release()`（真机 itf0 描述符：位图修饰键 + 5 槽数组）
   → 松开 2~5 必须补发 4 个松开，且 Shift（位图段）不被数组去重误释放。
 
+### 10. 描述符鼠标卸载不补发按住的按键（真机 gadget 验证发现）
+
+`slot_release()` 原来只调 `hid_nkro_release_all()`（键盘）与 `hid_dispatch_reset()`
+（boot 键鼠）。但**描述符鼠标**的按键状态在 `s_mouse[].last_buttons`，既不在
+NKRO shadow 里、也不在 `hid_dispatch` 的 slot 状态里 —— 于是"按着鼠标左键拔掉
+设备/卸载"时，上层永远等不到松开（映射引擎里该键会卡住）。
+
+主机样本测试没覆盖到，是在树莓派上用 USB gadget 真机验证时，从事件计数
+（按着左键卸载后 `key` 计数少 1）发现的。
+
+- 修法：新增 `hid_mouse_release_all()`（`src/hid_parser.c`），`slot_release()`
+  在 `caps & CAP_MOUSE_DESC` 时调用；bit i ↔ `btn_idx[i]`，与 dispatch 编码一致。
+- 用例：`test_mouse_umount_release()`（样本），以及真机 gadget 的
+  `tests/linux/verify_gadget.py` case A/B（断言卸载后的 `MOUSE ... up`）。
+
+---
+
+## 真机验证（USB gadget 回环）
+
+`tests/linux/` 下有一套用 Linux USB Gadget 在真实枚举下跑 hidkit 的工具
+（`hidkit_hidraw.c` + `verify_gadget.py`）：造出真机描述符的 HID 设备，
+gadget 口回接到主机，再用 hidraw 取描述符/报文喂给 hidkit。
+目前 4 个用例（Compx 复合接口、AJAZZ 复合接口、256 位 NKRO、同 Report ID 键鼠）
+全部通过。上面第 10 条就是它抓到的。详见 `tests/linux/README.md`。
+
 ---
 
 ## 解析增强（对照成熟实现）

@@ -131,7 +131,11 @@ static void slot_release(int8_t slot)
     if (caps & CAP_KB_NKRO) {
         hid_nkro_release_all(slot, &s_nkro[slot]);
     }
-    hid_dispatch_reset(slot);            /* boot 键鼠的补发松开（鼠标按键边沿也在这里） */
+    if (caps & CAP_MOUSE_DESC) {
+        /* 描述符鼠标的按键状态在 s_mouse（不是 hid_dispatch 那份），单独补发 */
+        hid_mouse_release_all(slot, &s_mouse[slot]);
+    }
+    hid_dispatch_reset(slot);            /* boot 键鼠的补发松开（固定鼠标按键也在这里） */
 
     if (caps & CAP_GAMEPAD) {
         /* 手柄按键补发松开（按布局表查回 BTN_* 再走统一 key 出口），轴归零 */
