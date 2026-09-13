@@ -7,25 +7,25 @@
  *                              ├─ ioctl(HIDIOCGRDESC) → hidkit_mount()
  *                              └─ read()               → hidkit_report() → 事件
  *
- * 用法（/dev/hidraw* 是 root only，需 sudo）：
- *   sudo ./hidkit_probe --list                      列出设备与 hidkit 分类
- *   sudo ./hidkit_probe --vidpid 046d:c08b          选中该 VID:PID
- *   sudo ./hidkit_probe --index 0 --dump-desc       选中列表里的第 0 组并 dump 描述符
- *   sudo ./hidkit_probe --name "Wireless"           按名称子串选中
- *   sudo ./hidkit_probe --seconds 10 --raw          跑 10 秒并打印原始报文
- *   sudo ./hidkit_probe                             只有一个设备时直接用；否则提示选择
+ * 用法（/dev/hidraw* 是 root only，需 sudo；建议用 probe.sh）：
+ *   sudo ./hidkit_probe                             监听**所有**设备，支持热插拔
+ *   sudo ./hidkit_probe --list                      只列出设备与 hidkit 分类
+ *   sudo ./hidkit_probe --vidpid 046d:c08b          只监听该 VID:PID
+ *   sudo ./hidkit_probe --name "Wireless"           只监听名称匹配的设备
+ *   sudo ./hidkit_probe --index 0                   只监听 --list 里第 0 组的 VID:PID
+ *   sudo ./hidkit_probe --dump-desc --seconds 10    附带描述符 dump，跑 10 秒
  *
  * 参数：
  *   --list              只列出，不监听
- *   --vidpid V:P        选中 VID:PID
- *   --index N           选中 --list 里的第 N 组（可逗号分隔多个）
- *   --name SUBSTR       按 HID_NAME 子串选中
+ *   --vidpid V:P        只监听该 VID:PID（可多次）
+ *   --index N[,N..]     只监听 --list 里第 N 组对应的 VID:PID
+ *   --name SUBSTR       只监听 HID_NAME 子串匹配的设备
  *   --proto N           强制 mount 的 proto（默认 0 = 描述符优先）
  *   --seconds N         监听时长（默认 0 = 直到 Ctrl-C）
+ *   --poll-ms N         热插拔轮询间隔（默认 500ms）
  *   --raw               打印每份原始报文
- *   --dump-desc         打印报告描述符逐 item 解析 + hidkit 解析结论
+ *   --dump-desc         新挂载时打印报告描述符逐 item 解析
  *   --mouse-ms N        鼠标位移聚合打印间隔毫秒（默认 100；0 = 每份都打）
- *   --no-warn           不打印“设备可能被内核占用”之类的提示
  */
 
 #define _GNU_SOURCE
@@ -51,6 +51,7 @@
 
 #define MAX_IFACES 64
 #define MAX_GROUPS 64
+#define MAX_ACTIVE 64
 #define DESC_MAX   4096
 
 /*--------------------------------------------------------------------+
@@ -58,18 +59,17 @@
  *--------------------------------------------------------------------*/
 
 typedef struct {
-    char     dev[300];        /* /dev/hidrawN */
+    char     dev[300];       /* /dev/hidrawN */
     char     sys[320];       /* /sys/class/hidraw/hidrawN */
-    char     group[256];     /* USB 物理设备分组键（HID_PHYS 去掉 /inputN） */
+    char     key[512];       /* 稳定身份：USB 接口路径（realpath 上级） */
+    char     group[256];     /* HID_PHYS 去掉 /inputN，用于 --list 分组 */
     char     name[128];      /* HID_NAME */
     uint16_t vid, pid;
     int      input_idx;      /* inputN 的 N（≈ 接口序号） */
-    int      proto_real;     /* 从 USB 接口 sysfs 读到的 bInterfaceProtocol（-1=未知） */
+    int      proto_real;     /* bInterfaceProtocol（-1=未知） */
     uint8_t  desc[DESC_MAX];
     uint32_t desc_len;
     bool     desc_ok;
-    int      fd;
-    int8_t   slot;
 } itf_t;
 
 typedef struct {
@@ -80,10 +80,19 @@ typedef struct {
     int      idx[MAX_IFACES];
 } group_t;
 
-static itf_t   g_itf[MAX_IFACES];
-static int     g_nitf;
-static group_t g_grp[MAX_GROUPS];
-static int     g_ngrp;
+/* 已挂载的接口：key 是稳定身份，slot >= 0 表示 hidkit 已接管 */
+typedef struct {
+    bool     used;
+    bool     filtered;       /* 匹配过滤条件而被忽略（不为它打印/卸载） */
+    char     key[512];
+    char     dev[300];
+    char     name[128];
+    uint16_t vid, pid;
+    int      fd;
+    int8_t   slot;
+} active_t;
+
+static active_t g_act[MAX_ACTIVE];
 
 static volatile sig_atomic_t g_stop;
 
@@ -158,7 +167,21 @@ static int read_itf_protocol(const char *sys)
     return atoi(line);
 }
 
-static bool read_report_desc(const char *dev, uint8_t *buf, uint32_t *len){
+/* 稳定身份：hidraw 的 HID 设备 realpath 去掉最后一段 = USB 接口路径 */
+static bool iface_key(const char *sys, char *out, size_t n)
+{
+    char p[1024], rp[1024];
+    snprintf(p, sizeof(p), "%s/device", sys);
+    if (!realpath(p, rp)) return false;
+    char *slash = strrchr(rp, '/');
+    if (!slash) return false;
+    *slash = '\0';
+    copy_str(out, n, rp);
+    return true;
+}
+
+static bool read_report_desc(const char *dev, uint8_t *buf, uint32_t *len)
+{
     int fd = open(dev, O_RDWR | O_NONBLOCK);
     if (fd < 0) return false;
 
@@ -177,20 +200,19 @@ static bool read_report_desc(const char *dev, uint8_t *buf, uint32_t *len){
     return true;
 }
 
-static void enumerate(void)
+/* 枚举当前所有 hidraw 接口到 out[]，返回数量 */
+static int enumerate(itf_t *out, int max)
 {
-    g_nitf = 0;
+    int n = 0;
     DIR *d = opendir("/sys/class/hidraw");
-    if (!d) return;
+    if (!d) return 0;
 
     struct dirent *de;
-    while ((de = readdir(d)) != NULL && g_nitf < MAX_IFACES) {
+    while ((de = readdir(d)) != NULL && n < max) {
         if (strncmp(de->d_name, "hidraw", 6) != 0) continue;
 
-        itf_t *t = &g_itf[g_nitf];
+        itf_t *t = &out[n];
         memset(t, 0, sizeof(*t));
-        t->fd = -1;
-        t->slot = -1;
         t->proto_real = -1;
         snprintf(t->sys, sizeof(t->sys), "/sys/class/hidraw/%s", de->d_name);
         snprintf(t->dev, sizeof(t->dev), "/dev/%s", de->d_name);
@@ -200,7 +222,11 @@ static void enumerate(void)
                          phys, sizeof(phys))) {
             continue;
         }
+        if (!iface_key(t->sys, t->key, sizeof(t->key)) || t->key[0] == '\0') {
+            copy_str(t->key, sizeof(t->key), t->sys);   /* 退化：用 sysfs 路径 */
+        }
         t->proto_real = read_itf_protocol(t->sys);
+
         /* 分组键：HID_PHYS = "usb-xhci-hcd.1-1/input0" → "usb-xhci-hcd.1-1" */
         copy_str(t->group, sizeof(t->group), phys);
         char *slash = strrchr(t->group, '/');
@@ -210,35 +236,34 @@ static void enumerate(void)
 
         t->desc_len = sizeof(t->desc);
         t->desc_ok = read_report_desc(t->dev, t->desc, &t->desc_len);
-        g_nitf++;
+        n++;
     }
     closedir(d);
+    return n;
 }
 
-static void groupify(void)
+static void groupify(const itf_t *itf, int nitf, group_t *grp, int *ngrp)
 {
-    g_ngrp = 0;
-    for (int i = 0; i < g_nitf; i++) {
+    *ngrp = 0;
+    for (int i = 0; i < nitf; i++) {
         int g = -1;
-        for (int j = 0; j < g_ngrp; j++) {
-            if (strcmp(g_grp[j].key, g_itf[i].group) == 0) { g = j; break; }
+        for (int j = 0; j < *ngrp; j++) {
+            if (strcmp(grp[j].key, itf[i].group) == 0) { g = j; break; }
         }
-        if (g < 0 && g_ngrp < MAX_GROUPS) {
-            g = g_ngrp++;
-            memset(&g_grp[g], 0, sizeof(g_grp[g]));
-            copy_str(g_grp[g].key, sizeof(g_grp[g].key), g_itf[i].group);
-            copy_str(g_grp[g].name, sizeof(g_grp[g].name), g_itf[i].name);
-            g_grp[g].vid = g_itf[i].vid;
-            g_grp[g].pid = g_itf[i].pid;
+        if (g < 0 && *ngrp < MAX_GROUPS) {
+            g = (*ngrp)++;
+            memset(&grp[g], 0, sizeof(grp[g]));
+            copy_str(grp[g].key, sizeof(grp[g].key), itf[i].group);
+            copy_str(grp[g].name, sizeof(grp[g].name), itf[i].name);
+            grp[g].vid = itf[i].vid;
+            grp[g].pid = itf[i].pid;
         }
-        if (g >= 0 && g_grp[g].n < MAX_IFACES) {
-            g_grp[g].idx[g_grp[g].n++] = i;
-        }
+        if (g >= 0 && grp[g].n < MAX_IFACES) grp[g].idx[grp[g].n++] = i;
     }
 }
 
 /*--------------------------------------------------------------------+
- * 描述符分类（调用 hidkit 内部解析器，只为显示）
+ * 描述符分类与 dump（调用 hidkit 内部解析器，只为显示）
  *--------------------------------------------------------------------*/
 
 static void appendf(char *buf, size_t n, int *off, const char *fmt, ...)
@@ -266,19 +291,13 @@ static void describe(const itf_t *t, char *out, size_t n)
     bool mcol = hid_desc_has_mouse_collection(t->desc, (uint16_t)t->desc_len);
 
     int off = 0;
-    if (kb) {
-        appendf(out, n, &off, "keyboard(NKRO spans=%u)", (unsigned)nd.num_spans);
-    }
+    if (kb) appendf(out, n, &off, "keyboard(NKRO spans=%u)", (unsigned)nd.num_spans);
     if (ms || mcol) {
         appendf(out, n, &off, "%smouse(btn=%u%s)", off ? "+" : "",
                 (unsigned)md.button_count, mcol ? ",collection" : "");
     }
     if (!off) copy_str(out, n, "hidkit 未识别的集合");
 }
-
-/*--------------------------------------------------------------------+
- * 描述符逐 item dump
- *--------------------------------------------------------------------*/
 
 static const char *usage_page_name(uint16_t p)
 {
@@ -314,7 +333,10 @@ static void dump_desc(const itf_t *t)
         printf("      %-6s ", ty);
         if (type == 1) {
             switch (tag) {
-            case 0x0: printf("Usage Page  = 0x%02X (%s)", val, usage_page_name((uint16_t)val)); g_page = (uint16_t)val; break;
+            case 0x0:
+                printf("Usage Page  = 0x%02X (%s)", val, usage_page_name((uint16_t)val));
+                g_page = (uint16_t)val;
+                break;
             case 0x1: case 0x2: {
                 int32_t sv = (size == 1) ? (int8_t)val
                            : (size == 2) ? (int16_t)val : (int32_t)val;
@@ -351,7 +373,6 @@ static void dump_desc(const itf_t *t)
         i += size;
     }
 
-    /* hidkit 解析结论 */
     hid_nkro_desc_t nd;
     hid_mouse_desc_t md;
     memset(&nd, 0, sizeof(nd));
@@ -361,8 +382,7 @@ static void dump_desc(const itf_t *t)
             const hid_nkro_span_t *sp = &nd.spans[s];
             printf("      => NKRO span[%u]: report_id=%u bit_off=%u %s min=0x%02X count=%u\n",
                    s, sp->report_id, sp->bit_offset,
-                   sp->bit_size == 1 ? "bitmap" : "array",
-                   sp->usage_min, sp->count);
+                   sp->bit_size == 1 ? "bitmap" : "array", sp->usage_min, sp->count);
         }
     }
     if (hid_mouse_parse(&md, t->desc, (uint16_t)t->desc_len)) {
@@ -370,7 +390,7 @@ static void dump_desc(const itf_t *t)
         if (md.idx_x != 0xFF) printf(" X@%u", md.fields[md.idx_x].bit_offset);
         if (md.idx_y != 0xFF) printf(" Y@%u", md.fields[md.idx_y].bit_offset);
         if (md.idx_wheel != 0xFF) printf(" Wheel@%u", md.fields[md.idx_wheel].bit_offset);
-        printf(" (鼠标有多个集合时逐字段解析)\n");
+        printf("\n");
     }
 }
 
@@ -514,21 +534,183 @@ void hidkit_debug_printf(const char *fmt, ...)
 }
 
 /*--------------------------------------------------------------------+
- * 选择与运行
+ * 过滤（--vidpid / --index / --name）
  *--------------------------------------------------------------------*/
 
-static void list_groups(void)
+typedef struct {
+    uint16_t vids[32], pids[32];
+    int      nvp;
+    char     name[128];
+} filter_t;
+
+static bool filter_match(const filter_t *f, const itf_t *t)
 {
-    if (g_ngrp == 0) {
+    if (f->nvp) {
+        bool ok = false;
+        for (int i = 0; i < f->nvp; i++) {
+            if (f->vids[i] == t->vid && f->pids[i] == t->pid) { ok = true; break; }
+        }
+        if (!ok) return false;
+    }
+    if (f->name[0] && !strcasestr(t->name, f->name)) return false;
+    return true;
+}
+
+/*--------------------------------------------------------------------+
+ * 挂载 / 卸载（监视器用）
+ *--------------------------------------------------------------------*/
+
+static active_t *active_by_key(const char *key)
+{
+    for (int i = 0; i < MAX_ACTIVE; i++) {
+        if (g_act[i].used && strcmp(g_act[i].key, key) == 0) return &g_act[i];
+    }
+    return NULL;
+}
+
+static active_t *active_free_slot(void)
+{
+    for (int i = 0; i < MAX_ACTIVE; i++) {
+        if (!g_act[i].used) return &g_act[i];
+    }
+    return NULL;
+}
+
+static void do_detach(active_t *a, const char *why)
+{
+    if (a->filtered) {          /* 被过滤的从未挂载，静默移除 */
+        a->used = false;
+        a->fd = -1;
+        a->slot = -1;
+        return;
+    }
+    if (a->slot >= 0) {
+        printf("[DETACH] %s %04x:%04x slot=%d (%s)\n",
+               a->dev, a->vid, a->pid, a->slot, why);
+        hidkit_umount(a->slot);      /* 补发按住的键/鼠标键松开 */
+    } else {
+        printf("[DETACH] %s %04x:%04x (%s)\n", a->dev, a->vid, a->pid, why);
+    }
+    fflush(stdout);
+    if (a->fd >= 0) close(a->fd);
+    a->used = false;
+    a->fd = -1;
+    a->slot = -1;
+}
+
+static const itf_t *find_by_key(const itf_t *cur, int n, const char *key)
+{
+    for (int i = 0; i < n; i++) {
+        if (strcmp(cur[i].key, key) == 0) return &cur[i];
+    }
+    return NULL;
+}
+
+static void do_attach(const itf_t *t, int proto, bool dump)
+{
+    active_t *a = active_free_slot();
+    if (!a) {
+        fprintf(stderr, "[ATTACH] %s 跳过：监视表已满\n", t->dev);
+        return;
+    }
+    memset(a, 0, sizeof(*a));
+    a->fd = -1;
+    a->slot = -1;
+    copy_str(a->key, sizeof(a->key), t->key);
+    copy_str(a->dev, sizeof(a->dev), t->dev);
+    copy_str(a->name, sizeof(a->name), t->name);
+    a->vid = t->vid;
+    a->pid = t->pid;
+    a->used = true;   /* 先占位：即使下面失败也不再重复打印 */
+
+    char desc[192];
+    describe(t, desc, sizeof(desc));
+    printf("[ATTACH] %s %04x:%04x %s iface~%d proto=%d desc=%uB 分类: %s\n",
+           t->dev, t->vid, t->pid, t->name, t->input_idx, t->proto_real,
+           (unsigned)t->desc_len, desc);
+    fflush(stdout);
+
+    if (dump && t->desc_ok) dump_desc(t);
+
+    if (!t->desc_ok) {
+        printf("  → 跳过：拿不到报告描述符（权限/设备未就绪）\n");
+        return;   /* a->slot 仍 -1，不监听 */
+    }
+
+    a->fd = open(t->dev, O_RDWR | O_NONBLOCK);
+    if (a->fd < 0) {
+        fprintf(stderr, "  → 打开 %s 失败: %s\n", t->dev, strerror(errno));
+        return;
+    }
+    hidkit_dev_info_t info;
+    memset(&info, 0, sizeof(info));
+    info.vid = t->vid;
+    info.pid = t->pid;
+    info.dev_addr = 0;
+    info.itf = (uint8_t)(t->input_idx >= 0 ? t->input_idx : 0);
+    info.proto = (uint8_t)proto;
+    info.report_desc = t->desc;
+    info.report_desc_len = (uint16_t)t->desc_len;
+    a->slot = hidkit_mount(&info);
+    if (a->slot < 0) {
+        printf("  → hidkit_mount 未接管（-1=不认识，-2=槽位满）: %d\n", a->slot);
+        close(a->fd);
+        a->fd = -1;
+        return;
+    }
+    printf("  → hidkit slot=%d 已接管\n", a->slot);
+    fflush(stdout);
+}
+
+/* 对账：新出现 → attach；消失 → detach */
+static void reconcile(const itf_t *cur, int ncur, const filter_t *f,
+                      int proto, bool dump)
+{
+    for (int i = 0; i < MAX_ACTIVE; i++) {
+        if (!g_act[i].used) continue;
+        if (!find_by_key(cur, ncur, g_act[i].key)) {
+            do_detach(&g_act[i], "设备已移除");
+        }
+    }
+    for (int i = 0; i < ncur; i++) {
+        if (active_by_key(cur[i].key)) continue;
+        if (!filter_match(f, &cur[i])) {
+            /* 记录为“见过但不匹配”，避免每轮重复判断 */
+            active_t *a = active_free_slot();
+            if (a) {
+                memset(a, 0, sizeof(*a));
+                a->fd = -1;
+                a->slot = -1;
+                a->used = true;
+                a->filtered = true;
+                copy_str(a->key, sizeof(a->key), cur[i].key);
+                copy_str(a->dev, sizeof(a->dev), cur[i].dev);
+                copy_str(a->name, sizeof(a->name), cur[i].name);
+                a->vid = cur[i].vid;
+                a->pid = cur[i].pid;
+            }
+            continue;
+        }
+        do_attach(&cur[i], proto, dump);
+    }
+}
+
+/*--------------------------------------------------------------------+
+ * 选择与列表
+ *--------------------------------------------------------------------*/
+
+static void list_groups(const itf_t *itf, const group_t *grp, int ngrp)
+{
+    (void)itf;
+    if (ngrp == 0) {
         printf("没有找到 HID 设备（/dev/hidraw* 需要 root；若刚插上可稍等重试）\n");
         return;
     }
-    for (int g = 0; g < g_ngrp; g++) {
-        group_t *gr = &g_grp[g];
+    for (int g = 0; g < ngrp; g++) {
         printf("[%d] %04x:%04x  %-28s  %d 个 HID 接口\n",
-               g, gr->vid, gr->pid, gr->name, gr->n);
-        for (int k = 0; k < gr->n; k++) {
-            itf_t *t = &g_itf[gr->idx[k]];
+               g, grp[g].vid, grp[g].pid, grp[g].name, grp[g].n);
+        for (int k = 0; k < grp[g].n; k++) {
+            const itf_t *t = &itf[grp[g].idx[k]];
             char desc[192];
             describe(t, desc, sizeof(desc));
             printf("      %-14s iface~%d bInterfaceProtocol=%d desc=%s\n",
@@ -538,78 +720,56 @@ static void list_groups(void)
     }
 }
 
-static bool select_group(int *idx, int max_sel, int *n_sel,
-                         const char *vidpid, const char *name, const char *index)
+static void usage(const char *argv0)
 {
-    *n_sel = 0;
+    printf("用法: %s [选项]        （默认：监听所有 HID 设备，支持热插拔）\n", argv0);
+    printf("  --list             列出 HID 设备与 hidkit 分类\n");
+    printf("  --vidpid V:P       只监听该 VID:PID（可多次）\n");
+    printf("  --index N[,N..]    只监听 --list 里第 N 组对应的 VID:PID\n");
+    printf("  --name SUBSTR      只监听 HID_NAME 匹配的设备\n");
+    printf("  --proto N          mount proto（默认 0 = 描述符优先）\n");
+    printf("  --seconds N        监听秒数（默认 0 = 直到 Ctrl-C）\n");
+    printf("  --poll-ms N        热插拔轮询间隔（默认 500ms）\n");
+    printf("  --raw              打印原始报文\n");
+    printf("  --dump-desc        新挂载时打印描述符逐 item 解析\n");
+    printf("  --mouse-ms N       鼠标位移聚合间隔毫秒（默认 100，0=每份）\n");
+}
 
-    if (vidpid) {
-        unsigned v = 0, p = 0;
-        if (sscanf(vidpid, "%x:%x", &v, &p) != 2) return false;
-        for (int g = 0; g < g_ngrp && *n_sel < max_sel; g++) {
-            if (g_grp[g].vid == v && g_grp[g].pid == p) idx[(*n_sel)++] = g;
-        }
-        return *n_sel > 0;
-    }
-    if (name) {
-        for (int g = 0; g < g_ngrp && *n_sel < max_sel; g++) {
-            if (strcasestr(g_grp[g].name, name)) idx[(*n_sel)++] = g;
-        }
-        return *n_sel > 0;
-    }
-    if (index) {
-        const char *s = index;
-        while (*s && *n_sel < max_sel) {
-            char *end = NULL;
-            long v = strtol(s, &end, 10);
-            if (end == s) break;
-            if (v >= 0 && v < g_ngrp) idx[(*n_sel)++] = (int)v;
-            if (*end != ',') break;
-            s = end + 1;
-        }
-        return *n_sel > 0;
-    }
+static bool resolve_index_filter(const itf_t *itf, int nitf, const char *index,
+                                 filter_t *f)
+{
+    group_t grp[MAX_GROUPS];
+    int ngrp = 0;
+    groupify(itf, nitf, grp, &ngrp);
 
-    if (g_ngrp == 1) { idx[0] = 0; *n_sel = 1; return true; }
-
-    if (!isatty(STDIN_FILENO)) return false;
-
-    list_groups();
-    printf("选择要监听的设备编号（多个用逗号分隔）: ");
-    fflush(stdout);
-    char buf[64];
-    if (!fgets(buf, sizeof(buf), stdin)) return false;
-    char *s = buf;
-    while (*s && *n_sel < max_sel) {
+    const char *s = index;
+    while (*s) {
         char *end = NULL;
         long v = strtol(s, &end, 10);
-        if (end == s) break;
-        if (v >= 0 && v < g_ngrp) idx[(*n_sel)++] = (int)v;
+        if (end == s) return false;
+        if (v < 0 || v >= ngrp) {
+            fprintf(stderr, "索引 %ld 超出范围（0..%d）\n", v, ngrp - 1);
+            return false;
+        }
+        if (f->nvp < (int)(sizeof(f->vids) / sizeof(f->vids[0]))) {
+            f->vids[f->nvp] = grp[v].vid;
+            f->pids[f->nvp] = grp[v].pid;
+            f->nvp++;
+        }
         if (*end != ',') break;
         s = end + 1;
     }
-    return *n_sel > 0;
-}
-
-static void usage(const char *argv0)
-{
-    printf("用法: %s [选项]\n", argv0);
-    printf("  --list             列出 HID 设备与 hidkit 分类\n");
-    printf("  --vidpid V:P       选中 VID:PID\n");
-    printf("  --index N[,N..]    选中 --list 里的第 N 组\n");
-    printf("  --name SUBSTR      按名称子串选中\n");
-    printf("  --proto N          mount proto（默认 0 = 描述符优先）\n");
-    printf("  --seconds N        监听秒数（默认 0 = 直到 Ctrl-C）\n");
-    printf("  --raw              打印原始报文\n");
-    printf("  --dump-desc        打印描述符逐 item 解析\n");
-    printf("  --mouse-ms N       鼠标位移聚合间隔毫秒（默认 100，0=每份）\n");
+    return f->nvp > 0;
 }
 
 int main(int argc, char **argv)
 {
     const char *vidpid = NULL, *name = NULL, *index = NULL;
     bool do_list = false, do_raw = false, do_dump = false;
-    int proto = 0, seconds = 0;
+    int proto = 0, seconds = 0, poll_ms = 500;
+
+    filter_t filter;
+    memset(&filter, 0, sizeof(filter));
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--list")) do_list = true;
@@ -620,30 +780,42 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--index") && i + 1 < argc) index = argv[++i];
         else if (!strcmp(argv[i], "--proto") && i + 1 < argc) proto = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--poll-ms") && i + 1 < argc) poll_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--mouse-ms") && i + 1 < argc) g_mouse_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "未知参数: %s\n", argv[i]); usage(argv[0]); return 2; }
     }
+    if (poll_ms < 50) poll_ms = 50;
 
-    enumerate();
-    groupify();
+    itf_t itf[MAX_IFACES];
+    int nitf = enumerate(itf, MAX_IFACES);
 
-    if (do_list) { list_groups(); return 0; }
-
-    if (g_nitf == 0) {
-        fprintf(stderr, "没有 HID 设备。请确认：设备已插好；用 sudo 运行（/dev/hidraw* 默认 root only）。\n");
-        return 3;
-    }
-    if (g_ngrp == 0) {
-        fprintf(stderr, "枚举到 %d 个 hidraw，但读不到 uevent。\n", g_nitf);
-        return 3;
+    if (do_list) {
+        group_t grp[MAX_GROUPS];
+        int ngrp = 0;
+        groupify(itf, nitf, grp, &ngrp);
+        list_groups(itf, grp, ngrp);
+        return 0;
     }
 
-    int sel[MAX_GROUPS], nsel = 0;
-    if (!select_group(sel, MAX_GROUPS, &nsel, vidpid, name, index)) {
-        fprintf(stderr, "无法确定目标设备，请用 --list 查看后用 --index/--vidpid/--name 指定。\n");
-        list_groups();
-        return 2;
+    /* 过滤条件：--vidpid 直接填；--index 先解析成 VID:PID；--name 子串 */
+    if (vidpid) {
+        unsigned v = 0, p = 0;
+        if (sscanf(vidpid, "%x:%x", &v, &p) == 2 &&
+            filter.nvp < (int)(sizeof(filter.vids) / sizeof(filter.vids[0]))) {
+            filter.vids[filter.nvp] = (uint16_t)v;
+            filter.pids[filter.nvp] = (uint16_t)p;
+            filter.nvp++;
+        } else {
+            fprintf(stderr, "无法解析 --vidpid %s\n", vidpid);
+            return 2;
+        }
+    }
+    if (index && !resolve_index_filter(itf, nitf, index, &filter)) return 2;
+    if (name) copy_str(filter.name, sizeof(filter.name), name);
+
+    if (nitf == 0) {
+        fprintf(stderr, "当前没有 HID 设备（仍会继续等热插拔；Ctrl-C 退出）\n");
     }
 
     hidkit_init();
@@ -655,92 +827,60 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    int nfd = 0;
-    for (int s = 0; s < nsel; s++) {
-        group_t *gr = &g_grp[sel[s]];
-        printf("==== 选中 [%d] %04x:%04x %s（%d 个接口）====\n",
-               sel[s], gr->vid, gr->pid, gr->name, gr->n);
-        for (int k = 0; k < gr->n; k++) {
-            itf_t *t = &g_itf[gr->idx[k]];
-            char desc[192];
-            describe(t, desc, sizeof(desc));
-            printf("  %s iface~%d proto=%d desc=%uB 分类: %s\n",
-                   t->dev, t->input_idx, t->proto_real,
-                   (unsigned)t->desc_len, desc);
-
-            if (do_dump && t->desc_ok) dump_desc(t);
-
-            if (!t->desc_ok) {
-                fprintf(stderr, "  跳过：拿不到报告描述符（权限？）\n");
-                continue;
-            }
-            t->fd = open(t->dev, O_RDWR | O_NONBLOCK);
-            if (t->fd < 0) {
-                fprintf(stderr, "  打开 %s 失败: %s\n", t->dev, strerror(errno));
-                continue;
-            }
-            hidkit_dev_info_t info;
-            memset(&info, 0, sizeof(info));
-            info.vid = gr->vid;
-            info.pid = gr->pid;
-            info.dev_addr = (uint8_t)sel[s];
-            info.itf = (uint8_t)(t->input_idx >= 0 ? t->input_idx : k);
-            info.proto = (uint8_t)proto;
-            info.report_desc = t->desc;
-            info.report_desc_len = (uint16_t)t->desc_len;
-            t->slot = hidkit_mount(&info);
-            if (t->slot < 0) {
-                fprintf(stderr, "  hidkit_mount 未接管（-1=不认识，-2=槽位满）: %d\n", t->slot);
-                close(t->fd);
-                t->fd = -1;
-                continue;
-            }
-            printf("  → hidkit slot=%d 已接管\n", t->slot);
-            nfd++;
-        }
-    }
-
-    if (nfd == 0) {
-        fprintf(stderr, "没有可监听的接口。\n");
-        return 4;
-    }
-
-    printf("\n---- 开始监听（敲键盘 / 动鼠标；Linux 侧可同时用 evtest 对照）；%s ----\n",
-           seconds > 0 ? "到时间自动结束" : "Ctrl-C 结束");
+    printf("==== 监听 %s（热插拔轮询 %dms，%s）====\n",
+           filter.nvp || filter.name[0] ? "匹配的设备" : "所有 HID 设备",
+           poll_ms, seconds > 0 ? "到时间自动结束" : "Ctrl-C 结束");
     fflush(stdout);
 
-    struct timeval t0;
+    struct timeval t0, last_poll;
     gettimeofday(&t0, NULL);
+    last_poll = t0;
+
     while (!g_stop) {
-        if (seconds > 0) {
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            if (now.tv_sec - t0.tv_sec >= seconds) break;
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        if (seconds > 0 && now.tv_sec - t0.tv_sec >= seconds) break;
+
+        /* --- 热插拔对账 --- */
+        long since_poll = (now.tv_sec - last_poll.tv_sec) * 1000 +
+                          (now.tv_usec - last_poll.tv_usec) / 1000;
+        if (since_poll >= poll_ms) {
+            int ncur = enumerate(itf, MAX_IFACES);
+            reconcile(itf, ncur, &filter, proto, do_dump);
+            last_poll = now;
         }
+
+        /* --- 读报文 --- */
         fd_set rf;
         FD_ZERO(&rf);
         int maxfd = -1;
-        for (int i = 0; i < g_nitf; i++) {
-            if (g_itf[i].fd < 0 || g_itf[i].slot < 0) continue;
-            FD_SET(g_itf[i].fd, &rf);
-            if (g_itf[i].fd > maxfd) maxfd = g_itf[i].fd;
+        for (int i = 0; i < MAX_ACTIVE; i++) {
+            if (g_act[i].used && g_act[i].fd >= 0 && g_act[i].slot >= 0) {
+                FD_SET(g_act[i].fd, &rf);
+                if (g_act[i].fd > maxfd) maxfd = g_act[i].fd;
+            }
         }
         struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
-        int r = select(maxfd + 1, &rf, NULL, NULL, &tv);
+        int r = (maxfd >= 0) ? select(maxfd + 1, &rf, NULL, NULL, &tv) : 0;
         if (r > 0) {
-            for (int i = 0; i < g_nitf; i++) {
-                if (g_itf[i].fd < 0 || g_itf[i].slot < 0) continue;
-                if (!FD_ISSET(g_itf[i].fd, &rf)) continue;
+            for (int i = 0; i < MAX_ACTIVE; i++) {
+                active_t *a = &g_act[i];
+                if (!a->used || a->fd < 0 || a->slot < 0) continue;
+                if (!FD_ISSET(a->fd, &rf)) continue;
                 uint8_t buf[512];
-                ssize_t n = read(g_itf[i].fd, buf, sizeof(buf));
-                if (n <= 0) continue;
+                ssize_t n = read(a->fd, buf, sizeof(buf));
+                if (n <= 0) {
+                    /* ENODEV/0 = 设备已拔出；下一轮对账也会兜住 */
+                    do_detach(a, n == 0 ? "读结束" : "读错误/已拔出");
+                    continue;
+                }
                 if (do_raw) {
-                    printf("[RX] slot=%d len=%d data=", g_itf[i].slot, (int)n);
+                    printf("[RX] slot=%d len=%d data=", a->slot, (int)n);
                     for (ssize_t x = 0; x < n; x++) printf("%02X", buf[x]);
                     printf("\n");
                     fflush(stdout);
                 }
-                hidkit_report(g_itf[i].slot, buf, (uint16_t)n);
+                hidkit_report(a->slot, buf, (uint16_t)n);
             }
         }
         flush_mouse();
@@ -748,11 +888,9 @@ int main(int argc, char **argv)
     flush_mouse();
 
     printf("\n---- 结束，补发松开并汇总 ----\n");
-    for (int i = 0; i < g_nitf; i++) {
-        if (g_itf[i].slot >= 0) {
-            hidkit_umount(g_itf[i].slot);
-            if (g_itf[i].fd >= 0) close(g_itf[i].fd);
-        }
+    for (int i = 0; i < MAX_ACTIVE; i++) {
+        if (g_act[i].used && g_act[i].slot >= 0) do_detach(&g_act[i], "退出");
+        else if (g_act[i].used && g_act[i].fd >= 0) close(g_act[i].fd);
     }
     printf("SUMMARY key=%d mouse_btn=%d mouse_move=%d gamepad=%d\n",
            g_nkey, g_nmouse_btn, g_nmouse_move, g_ngp);

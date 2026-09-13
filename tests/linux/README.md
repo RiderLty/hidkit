@@ -50,32 +50,38 @@ sudo ./hidkit_hidraw 3554:fa09 6      # 6 秒；第 3 个参数可指定 proto
 `verified_gadget.py` 是自动化回归；日常看真实设备用 `hidkit_probe`：
 
 ```bash
-./tests/linux/probe.sh --list                                  # 列出设备 + hidkit 分类
-./tests/linux/probe.sh --index 0 --dump-desc                   # 选中并 dump 描述符
-./tests/linux/probe.sh --vidpid 046d:c08b --name "" --raw      # 按 VID:PID / 名称选
-./tests/linux/probe.sh --index 0 --seconds 10                  # 跑 10 秒
+./tests/linux/probe.sh                      # 不加参数：监听**所有** HID 设备，支持热插拔
+./tests/linux/probe.sh --list               # 只列出设备 + hidkit 分类
+./tests/linux/probe.sh --vidpid 046d:c08b   # 只监听某 VID:PID（--name 同理）
+./tests/linux/probe.sh --index 0 --dump-desc  # 只监听 --list 第 0 组，并 dump 描述符
+./tests/linux/probe.sh --seconds 10 --raw   # 跑 10 秒，附带原始报文
 ```
 
 `probe.sh` 会自动编译并以 root 运行（`/dev/hidraw*` 默认 root only）。
+监视器编译时把槽位开到 32 并用 `DROP_NEW`，避免设备多时被 `EVICT_IDLE` 挤掉
+（挤掉会让 slot 复用、事件串台）。
 
 流程：
 
-1. 把键盘/鼠标插到主机的**普通 USB 口**（别插 gadget 口）。
-2. `probe.sh --list`：看每个接口的 `VID:PID / 名称 / bInterfaceProtocol / 描述符
-   分类`（keyboard(NKRO spans=N) / mouse(btn=N) / 两者）。
-3. 选中设备后敲键、动鼠标，看 `[EV]`：键盘打印可读键名（`a`、`LShift`、`F1`），
-   鼠标打印按键与聚合后的位移；`--raw` 还能看原始十六进制报文。
-4. `--dump-desc`：把描述符逐 item 打出来，并附上 hidkit 的结论
-   （NKRO 每个 span 的 report_id/bit_offset/usage 范围、鼠标 X/Y/Wheel 的位偏移），
+1. 把键盘/鼠标插到主机的**普通 USB 口**（别插 gadget 口），直接 `probe.sh`。
+2. 不加参数时：进程启动、**以及运行中每次插拔**都会自动挂载/卸载——
+   `[ATTACH] ... 分类: keyboard(NKRO spans=1)+mouse(...)` / `[DETACH] ... (设备已移除)`。
+   拔设备时会 `hidkit_umount()` **补发按住键的松开**（避免上层卡键）。
+3. 敲键、动鼠标，看 `[EV]`：键盘打印可读键名（`a`、`LShift`、`F1`），鼠标打印按键与
+   聚合后的位移；`--raw` 还能看原始十六进制报文。
+4. 想先确认设备认不认得：`--list` 看分类，`--dump-desc` 把描述符逐 item 打出来并附
+   hidkit 结论（NKRO 每个 span 的 report_id/bit_offset/usage 范围、鼠标 X/Y/Wheel 偏移），
    排查"为什么这个键盘不被支持"时最有用。
-5. Ctrl-C 结束：会 `hidkit_umount()` 补发按住键的松开并打印 `SUMMARY`。
+5. Ctrl-C 结束：会补发仍未松开键的松开并打印 `SUMMARY`。
 6. **交叉验证**：同一设备用 `sudo evtest` 或 `libinput debug-events` 看 Linux 的解释，
    应与 hidkit 输出一致。
 
 注意：
 
-- 一个物理设备（含多接口接收器）会作为一组一起挂载；同一接口上的键鼠集合由
-  hidkit 按 Report ID 路由，共用同一 ID 时并行解析。
+- 热插拔是**轮询** `/sys/class/hidraw` 实现的（默认 500ms，`--poll-ms N` 调整）；
+  身份用稳定的 USB 接口路径，所以 `hidrawN` 号复用不会误判成同一设备。
+- 一个物理设备（含多接口接收器）的每个接口各占一个 hidkit slot；同一接口上的键鼠集合
+  由 hidkit 按 Report ID 路由，共用同一 ID 时并行解析。
 - 真实鼠标 1kHz，默认把位移按 100ms 聚合打印（`--mouse-ms N` 调整，`0` = 每份都打）。
 - Linux 侧额外因素（内核可能切 boot protocol、input 子系统、hidraw 权限）只在这台
   主机上存在；hidkit 的目标平台仍是嵌入式 host 栈，这里只是"同一个解析路径的真机输入"。
