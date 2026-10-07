@@ -815,6 +815,60 @@ static void test_hid_gamepad_ds5(void)
     CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
 }
 
+/* DS Edge（054c:0df2）：报文布局与 DS5 完全一致，但 PID 不同且 bit 20-23
+ * 多出四个附加按键（内核 hid-playstation.c 的 buttons[2] bit4-7 =
+ * FN1/FN2/左背键/右背键 → 报文字节 10 的 bit4-7）。
+ * 重点回归：DS5 的按钮表只到 bit18，若 Edge 复用 DS5 布局表/查表长度，
+ * 背键位会被静默吞掉。 */
+static void test_hid_gamepad_ds_edge(void)
+{
+    printf("HID 手柄布局（DS Edge 054c:0df2）：附加背键应出 BTN_EXTRA_* 事件\n");
+    ev_reset();
+
+    static const uint8_t k_placeholder_desc[] = { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0 };
+
+    hidkit_dev_info_t info = { .vid = 0x054c, .pid = 0x0df2, .dev_addr = 12, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_placeholder_desc,
+                               .report_desc_len = sizeof(k_placeholder_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "DS Edge 应被认领为手柄，实得 %d", slot);
+    CHECK(hidkit_is_gamepad(slot), "应被标记为手柄");
+
+    uint8_t rpt[64];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x01;      /* Report ID */
+    rpt[1] = 128;       /* ls_x（中心）*/
+    rpt[2] = 128;       /* ls_y */
+    rpt[3] = 128;       /* rs_x */
+    rpt[4] = 128;       /* rs_y */
+    rpt[8] = 0x08;      /* buttons: dpad=8（释放）*/
+    rpt[10] = 0x40;     /* buttons[2] bit6 = 左背键按下 */
+
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_gp.n == 1, "应回调一次手柄绝对状态，实得 %d", g_gp.n);
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_GAMEPAD | BTN_EXTRA_4) &&
+          g_key[0].pressed,
+          "应恰好一个左背键(BTN_EXTRA_4)按下事件，实得 %d 个（首个 code=0x%04X）",
+          g_key_n, g_key_n ? g_key[0].code : 0);
+
+    /* 左背键 + 右背键同时按下：字节 10 = 0xC0 → 两个独立事件 */
+    rpt[10] = 0xC0;
+    hidkit_report(slot, rpt, sizeof(rpt));
+    CHECK(g_key_n == 2 && g_key[1].code == (HIDKIT_CODE_GAMEPAD | BTN_EXTRA_5) &&
+          g_key[1].pressed, "右背键(BTN_EXTRA_5)应同时按下，实得 %d 个", g_key_n);
+
+    /* 全部抬起 → 两个松开事件（顺序与按下相反：先查低位）*/
+    rpt[10] = 0x00;
+    hidkit_report(slot, rpt, sizeof(rpt));
+    CHECK(g_key_n == 4 && g_key[2].code == (HIDKIT_CODE_GAMEPAD | BTN_EXTRA_4) &&
+          !g_key[2].pressed && g_key[3].code == (HIDKIT_CODE_GAMEPAD | BTN_EXTRA_5) &&
+          !g_key[3].pressed, "应补两个背键松开事件，实得 %d 个", g_key_n);
+
+    hidkit_umount(slot);
+    CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
+}
+
 /*--------------------------------------------------------------------+
  * 真机回归：一个接口同时带 NKRO 键盘与鼠标集合
  *
@@ -1255,6 +1309,7 @@ int main(void)
     hidkit_init();
     printf("== hidkit 主机侧样本测试 ==\n");
     test_hid_gamepad_ds5();
+    test_hid_gamepad_ds_edge();
     test_boot_keyboard();
     test_fixed_mouse();
     test_nkro_keyboard();

@@ -4,7 +4,8 @@
  *
  * 架构：
  *   hidkit_mount()（由宿主 USB 栈的挂载回调驱动）
- *     → gp_parse_fn = ds5_match()? ds5_parse : azeron_match()? azeron_parse : ...
+ *     → gp_parse_fn = ds5_match()? ds5_parse : ds_edge_match()? ds_edge_parse
+ *                    : azeron_match()? azeron_parse : ...
  *   hidkit_report()
  *     → gp->parse(report, len, &state)   // 函数指针，不 switch
  *     → 上层据此产出事件（按键边沿 → key 事件、轴 → gamepad_abs）
@@ -21,6 +22,7 @@
 
 // ── 已支持手柄 ──
 #include "layouts/gamepad_ds5.h"
+#include "layouts/gamepad_ds_edge.h"   // 复用 ds5 报文布局，仅 PID 与按钮表不同
 #include "layouts/gamepad_azeron.h"
 /*--------------------------------------------------------------------+
  * 解析函数指针类型
@@ -51,6 +53,7 @@ static gamepad_info_t g_gp[HIDKIT_MAX_SLOTS];
 static gp_parse_fn gp_lookup(uint16_t vid, uint16_t pid)
 {
     if (ds5_match(vid, pid))    return ds5_parse;
+    if (ds_edge_match(vid, pid)) return ds_edge_parse;
     if (azeron_match(vid, pid)) return azeron_parse;
     return NULL;   // 未知手柄
 }

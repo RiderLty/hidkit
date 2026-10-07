@@ -218,7 +218,7 @@ ConfigFS 造出真机描述符的 HID 设备，在**真实 USB 枚举**下跑 hi
 ## 来源与许可
 
 代码取自一套**经过实际设备验证**的 HID/XInput 解析实现
-（键鼠描述符解析、NKRO、boot 协议、DS5/Azeron/XInput 手柄布局）。
+（键鼠描述符解析、NKRO、boot 协议、DS5/DS Edge/Azeron/XInput 手柄布局）。
 移植时只做了三类改动：去掉平台依赖（Pico SDK 宏与应用侧业务逻辑）、
 统一事件出口与 code 空间、槽位管理归本库。
 
