@@ -101,6 +101,10 @@ void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                               int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
 
+/* 手柄六轴运动数据（陀螺仪 + 加速度计）。量程约定见下节 */
+void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
+                                 int16_t ax, int16_t ay, int16_t az);
+
 /* 可选诊断：设备被丢弃时通知一次 */
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 ```
@@ -122,9 +126,38 @@ slot 用来区分设备（多键盘/多鼠标各占一个）。不定义这些�
 
 以后新增 HID 设备类型（消费类媒体键等）只需**加一段前缀**，不必改回调签名。
 
+### 六轴量程约定（新布局必须照此缩放）
+
+手柄六轴（陀螺仪 + 加速度计）与摇杆共用同一套"满量程 = ±32767"的归一化约定，
+**基准取 DS5（DualSense / DualSense Edge）满量程**：
+
+| 量 | 满量程 | 1 unit | 换算公式（非 DS5 布局用） |
+|---|---|---|---|
+| 陀螺仪 | **±32767 = ±2000 dps** | ≈ 0.0610 dps | `out = dps × 32767 / 2000` |
+| 加速度 | **±32767 = ±4 g** | ≈ 0.122 mg | `out = mg × 32767 / 4000` |
+
+规范条款（新增手柄布局时必须遵守）：
+
+1. **DS5/DS Edge 原始计数即该比例**（±32768 ↔ 满量程），`ds5_parse` 直通即可；
+   其他布局按上表公式缩放到 `-32767..32767`。
+2. **钳位**：raw = -32768 时钳到 -32767（值域闭区间，与摇杆约定一致）。
+3. **轴序与符号 = 设备原生透传，不做重映射**（DS5 参考：X=俯仰 pitch、
+   Y=偏航 yaw、Z=横滚 roll）。消费方自行映射。
+4. **加速度含重力**：静止正面朝上时 accel_z ≈ ∓8192（∓1 g）。零偏与重力
+   补偿是消费方策略，库内不做。
+5. **`has_motion` 必须如实声明**：布局报文含有效六轴时置 1，否则恒 0。
+   无 IMU 的手柄**不发**运动事件 —— 0 对陀螺仪是合法读数（"完全静止"），
+   发 0 是伪造读数。
+6. **umount 补发一次全零**：消费方没有 umount 通知，补零就是"设备已离开"
+   的信号（角速度停在旧值上会让积分式解算永久漂移）。
+
+锚点宏 `HIDKIT_MOTION_GYRO_FULL_SCALE_DPS`（2000）与
+`HIDKIT_MOTION_ACCEL_FULL_SCALE_MG`（4000）在 `include/hidkit.h`。
+
 ### 可选拦截钩子（同样是弱符号）
 
-`hidkit_hook_key()` / `hidkit_hook_mouse_abs()` / `hidkit_hook_gamepad_abs()`：
+`hidkit_hook_key()` / `hidkit_hook_mouse_abs()` / `hidkit_hook_gamepad_abs()` /
+`hidkit_hook_gamepad_motion()`：
 在出口函数**之前**调用，可**改写或吞掉**事件（做重映射、锁定、屏蔽），默认直通。
 见 [`src/hidkit_hooks.h`](src/hidkit_hooks.h)。
 

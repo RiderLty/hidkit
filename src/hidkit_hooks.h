@@ -25,4 +25,10 @@ bool hidkit_hook_mouse_abs(int32_t *dx, int32_t *dy, int32_t *wheel);
 bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y, int32_t *rs_x,
                              int32_t *rs_y, int32_t *lt, int32_t *rt);
 
+/* 手柄六轴（陀螺仪 + 加速度计，量程约定见 include/hidkit.h 的
+ * hidkit_input_gamepad_motion）。umount 补发的全零帧也经过这里，
+ * 钩子可在断连帧做自己的清理；想屏蔽断连帧在此吞掉即可。 */
+bool hidkit_hook_gamepad_motion(int16_t *gx, int16_t *gy, int16_t *gz,
+                                int16_t *ax, int16_t *ay, int16_t *az);
+
 #endif /* HIDKIT_HOOKS_H */

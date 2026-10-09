@@ -51,6 +51,19 @@ HIDKIT_WEAK void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_
     (void)rt;
 }
 
+HIDKIT_WEAK void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy,
+                                             int16_t gz, int16_t ax,
+                                             int16_t ay, int16_t az)
+{
+    (void)slot;
+    (void)gx;
+    (void)gy;
+    (void)gz;
+    (void)ax;
+    (void)ay;
+    (void)az;
+}
+
 HIDKIT_WEAK void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid)
 {
     (void)slot;

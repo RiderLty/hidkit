@@ -63,8 +63,8 @@ struct dualsense_input_report {
     uint8_t seq_number;
     union ds_buttons buttons;
     uint32_t reserved;
-    uint16_t gyro_x, gyro_y, gyro_z;
-    uint16_t accel_x, accel_y, accel_z;
+    int16_t gyro_x, gyro_y, gyro_z;   /* 有符号 le16（±2000 dps 满量程）*/
+    int16_t accel_x, accel_y, accel_z; /* 有符号 le16（±4 g 满量程）*/
     uint32_t sensor_timestamp;
     uint8_t reserved2;
     struct touch_point points_1;
@@ -172,6 +172,20 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     // --- 模拟扳机 ---
     out->lt = ((int32_t)rpt->lt * (int32_t)(INT16_MAX / DS5_TRIG_MAX));
     out->rt = ((int32_t)rpt->rt * (int32_t)(INT16_MAX / DS5_TRIG_MAX));
+
+    // --- 六轴（陀螺仪 + 加速度计）---
+    // 量程约定见 include/hidkit.h：±32767 = ±2000 dps / ±4 g。DS5 原始计数
+    // 本身就是这个比例（±32768 ↔ 满量程），直通即可，仅钳掉 int16 负向多出
+    // 的 -32768（值域闭区间 -32767..32767，与摇杆约定一致）。
+    // 轴序 = 设备原生（X=俯仰 pitch、Y=偏航 yaw、Z=横滚 roll），符号不翻转；
+    // 加速度含重力（静止正面朝上 accel_z ≈ ∓8192 = ∓1 g），零偏归消费方。
+    out->gyro_x  = (int16_t)(rpt->gyro_x  == -32768 ? -32767 : rpt->gyro_x);
+    out->gyro_y  = (int16_t)(rpt->gyro_y  == -32768 ? -32767 : rpt->gyro_y);
+    out->gyro_z  = (int16_t)(rpt->gyro_z  == -32768 ? -32767 : rpt->gyro_z);
+    out->accel_x = (int16_t)(rpt->accel_x == -32768 ? -32767 : rpt->accel_x);
+    out->accel_y = (int16_t)(rpt->accel_y == -32768 ? -32767 : rpt->accel_y);
+    out->accel_z = (int16_t)(rpt->accel_z == -32768 ? -32767 : rpt->accel_z);
+    out->has_motion = 1;
 
     // --- 按键：原生布局一次拷贝 ---
     out->buttons = rpt->buttons.raw;

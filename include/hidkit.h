@@ -76,6 +76,21 @@ void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                               int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
 
+/* 手柄六轴运动数据（陀螺仪 + 加速度计）：每份含六轴的解析成功报文都会回调
+ * （不做去重）。仅带 IMU 的手柄（如 DS5/DS Edge）会回调；无 IMU 的手柄
+ * （XInput/Azeron）不发 —— 0 对陀螺仪是合法读数（"完全静止"），发 0 是
+ * 伪造读数。设备卸载时会补发一次全零（消费方没有 umount 通知，补零就是
+ * "设备已离开"的信号；与按钮补松开、摇杆归零同一语义）。
+ *
+ * 量程约定（基准 = DS5 满量程，与摇杆 -32767..32767 约定同构）：
+ *   陀螺仪：±32767 = ±HIDKIT_MOTION_GYRO_FULL_SCALE_DPS (±2000 dps)
+ *   加速度：±32767 = ±4 g（1 g ≈ 8192）；静止时含重力分量（正面朝上
+ *           accel_z ≈ ∓8192），零偏与重力补偿是消费方策略，库内不做。
+ *   轴序与符号 = 设备原生透传，库内不做重映射（DS5 参考：X=俯仰
+ *   pitch、Y=偏航 yaw、Z=横滚 roll）。 */
+void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
+                                 int16_t ax, int16_t ay, int16_t az);
+
 /* 可选诊断：设备被丢弃时（槽位耗尽且策略为 DROP_NEW）通知一次。 */
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 
@@ -83,9 +98,19 @@ void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
  * 手柄布局：设备原生位 + 位→BTN_* 查表（HID 手柄与 XInput 共用同一结构）
  *--------------------------------------------------------------------*/
 
+/* 六轴量程锚点（只做文档与换算参照，库内不参与运算）：非 DS5 布局按
+ *   gyro  = dps  * 32767 / HIDKIT_MOTION_GYRO_FULL_SCALE_DPS
+ *   accel = mg   * 32767 / HIDKIT_MOTION_ACCEL_FULL_SCALE_MG
+ * 缩放到 -32767..32767。 */
+#define HIDKIT_MOTION_GYRO_FULL_SCALE_DPS   2000
+#define HIDKIT_MOTION_ACCEL_FULL_SCALE_MG   4000   /* 1 g ≈ 8192 unit */
+
 typedef struct {
     int32_t  ls_x, ls_y, rs_x, rs_y;  /* -32767..32767 */
     int32_t  lt, rt;                  /* 0..32767 */
+    int16_t  gyro_x, gyro_y, gyro_z;  /* ±32767 = ±2000 dps（量程约定见上） */
+    int16_t  accel_x, accel_y, accel_z; /* ±32767 = ±4 g，静止时含重力 */
+    uint8_t  has_motion;              /* 本报文含有效六轴数据（布局声明） */
     uint32_t buttons;                 /* 设备原生位布局 */
     const uint16_t *btn_map;          /* 第 i 位 → BTN_* / DPAD_* */
     uint8_t  btn_count;

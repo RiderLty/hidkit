@@ -39,3 +39,15 @@ HIDKIT_WEAK bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y,
     (void)rt;
     return true;
 }
+
+HIDKIT_WEAK bool hidkit_hook_gamepad_motion(int16_t *gx, int16_t *gy, int16_t *gz,
+                                            int16_t *ax, int16_t *ay, int16_t *az)
+{
+    (void)gx;
+    (void)gy;
+    (void)gz;
+    (void)ax;
+    (void)ay;
+    (void)az;
+    return true;
+}

@@ -61,12 +61,17 @@ static key_ev_t g_key[MAX_EV];
 static int      g_key_n;
 static struct { int32_t dx, dy, wheel; int n; } g_mouse;
 static struct { int32_t ls_x, ls_y, lt; int n; } g_gp;
+static struct { int16_t gx, gy, gz, ax, ay, az; int n; } g_motion;
+/* 希望被钩子吞掉的六轴帧（声明在前，ev_reset 要清它）*/
+static bool g_motion_hook_swallow;
 
 static void ev_reset(void)
 {
     g_key_n = 0;
     memset(&g_mouse, 0, sizeof(g_mouse));
     memset(&g_gp, 0, sizeof(g_gp));
+    memset(&g_motion, 0, sizeof(g_motion));
+    g_motion_hook_swallow = false;
 }
 
 /* 覆盖弱符号：这就是使用方接入的写法（与 core_input_* 同一风格） */
@@ -85,6 +90,14 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
     (void)slot; (void)rs_x; (void)rs_y; (void)rt;
     g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.lt = lt; g_gp.n++;
 }
+void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
+                                 int16_t ax, int16_t ay, int16_t az)
+{
+    (void)slot;
+    g_motion.gx = gx; g_motion.gy = gy; g_motion.gz = gz;
+    g_motion.ax = ax; g_motion.ay = ay; g_motion.az = az;
+    g_motion.n++;
+}
 
 /* 希望被钩子吞掉的 code（0 = 不吞）*/
 static uint16_t g_hook_swallow;
@@ -95,6 +108,13 @@ bool hidkit_hook_key(uint16_t *code, bool *pressed)
     (void)pressed;
     if (g_hook_swallow && *code == g_hook_swallow) return false;
     return true;
+}
+
+bool hidkit_hook_gamepad_motion(int16_t *gx, int16_t *gy, int16_t *gz,
+                                int16_t *ax, int16_t *ay, int16_t *az)
+{
+    (void)gx; (void)gy; (void)gz; (void)ax; (void)ay; (void)az;
+    return !g_motion_hook_swallow;
 }
 
 /*--------------------------------------------------------------------+
@@ -869,6 +889,60 @@ static void test_hid_gamepad_ds_edge(void)
     CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
 }
 
+/* 六轴（陀螺仪 + 加速度计）：DS5 原始计数即归一化比例（±32767 = ±2000 dps /
+ * ±4 g，量程约定见 include/hidkit.h），parse 直通；-32768 钳到 -32767；
+ * umount 补发一次全零（消费方没有 umount 通知，补零 = "设备已离开"信号）；
+ * 钩子可吞掉。无 IMU 的布局（XInput/Azeron）结构上没有 motion 调用点
+ * （has_motion 恒 0），主机侧没有它们的挂载路径，由真机回归覆盖。 */
+static void test_hid_gamepad_motion(void)
+{
+    printf("HID 手柄六轴（DS5）：直通 + 钳位 + umount 补零 + 钩子\n");
+    ev_reset();
+
+    static const uint8_t k_placeholder_desc[] = { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0 };
+    hidkit_dev_info_t info = { .vid = 0x054c, .pid = 0x0ce6, .dev_addr = 13, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_placeholder_desc,
+                               .report_desc_len = sizeof(k_placeholder_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应认领为手柄，实得 %d", slot);
+
+    /* 报文布局（Report ID 后的偏移）：gyro_x=15、gyro_y=17、gyro_z=19、
+     * accel_x=21、accel_y=23、accel_z=25（各 le16）→ 缓冲区下标 +1。
+     * gyro_x = 16384（= 1000 dps，满量程的一半）；gyro_z = 0x8000（-32768，
+     * 应钳到 -32767）；accel_y = 0x8000（同上）；accel_z = 8192（静止重力
+     * 1 g 的参考值）。 */
+    uint8_t rpt[64];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x01;      /* Report ID */
+    rpt[8] = 0x08;      /* buttons: dpad=8（释放），不出按键事件 */
+    rpt[16] = 0x00; rpt[17] = 0x40;   /* gyro_x = +16384 */
+    rpt[20] = 0x00; rpt[21] = 0x80;   /* gyro_z = -32768 → 钳 -32767 */
+    rpt[24] = 0x00; rpt[25] = 0x80;   /* accel_y = -32768 → 钳 -32767 */
+    rpt[26] = 0x00; rpt[27] = 0x20;   /* accel_z = +8192 */
+
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_motion.n == 1, "应回调一次六轴，实得 %d", g_motion.n);
+    CHECK(g_motion.gx == 16384 && g_motion.gy == 0 && g_motion.gz == -32767 &&
+          g_motion.ax == 0 && g_motion.ay == -32767 && g_motion.az == 8192,
+          "六轴应直通（含 -32768 钳位），实得 g=(%d,%d,%d) a=(%d,%d,%d)",
+          g_motion.gx, g_motion.gy, g_motion.gz, g_motion.ax, g_motion.ay, g_motion.az);
+
+    /* 钩子吞掉：帧不到达回调 */
+    g_motion_hook_swallow = true;
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_motion.n == 1, "被钩子吞掉的六轴帧不应到达回调，实得 %d", g_motion.n);
+    g_motion_hook_swallow = false;
+
+    /* umount：补发一次全零（走完整链路，钩子已恢复直通） */
+    hidkit_umount(slot);
+    CHECK(g_motion.n == 2, "卸载应补发一次六轴全零，实得 %d", g_motion.n);
+    CHECK(g_motion.gx == 0 && g_motion.gy == 0 && g_motion.gz == 0 &&
+          g_motion.ax == 0 && g_motion.ay == 0 && g_motion.az == 0,
+          "补发帧应为全零，实得 g=(%d,%d,%d) a=(%d,%d,%d)",
+          g_motion.gx, g_motion.gy, g_motion.gz, g_motion.ax, g_motion.ay, g_motion.az);
+}
+
 /*--------------------------------------------------------------------+
  * 真机回归：一个接口同时带 NKRO 键盘与鼠标集合
  *
@@ -1310,6 +1384,7 @@ int main(void)
     printf("== hidkit 主机侧样本测试 ==\n");
     test_hid_gamepad_ds5();
     test_hid_gamepad_ds_edge();
+    test_hid_gamepad_motion();
     test_boot_keyboard();
     test_fixed_mouse();
     test_nkro_keyboard();

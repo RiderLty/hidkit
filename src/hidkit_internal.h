@@ -24,6 +24,10 @@ void hidkit_emit_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
 
+/* 手柄六轴运动数据（仅带 IMU 的布局调用；umount 补发全零也走这里） */
+void hidkit_emit_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
+                                int16_t ax, int16_t ay, int16_t az);
+
 /* 槽位是否仍在使用（解析层用它做早期返回，避免回调打到已卸载的槽位） */
 bool hidkit_slot_alive(int8_t slot);
 

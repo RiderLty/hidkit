@@ -61,6 +61,7 @@ typedef struct {
     uint32_t last_buttons;                 /* 手柄按键边沿用 */
     const uint16_t *btn_map;               /* 手柄布局表（指向静态表，卸载时补发松开要用） */
     uint8_t  btn_count;
+    bool     has_motion;                   /* 布局声明含六轴（卸载时补发全零要用） */
     uint32_t seq;                          /* 分配序号：EVICT_IDLE 的退化判据 */
     bool     logged_unconsumed;             /* 该槽位的「报文未消费」只报一次 */
 #if defined(HIDKIT_TICK_MS)
@@ -102,6 +103,13 @@ void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 {
     if (!hidkit_hook_gamepad_abs(&ls_x, &ls_y, &rs_x, &rs_y, &lt, &rt)) return;
     hidkit_input_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
+}
+
+void hidkit_emit_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
+                                int16_t ax, int16_t ay, int16_t az)
+{
+    if (!hidkit_hook_gamepad_motion(&gx, &gy, &gz, &ax, &ay, &az)) return;
+    hidkit_input_gamepad_motion(slot, gx, gy, gz, ax, ay, az);
 }
 
 // 每份报文的第一个调用（hidkit_report 进来就查）。跨 TU 无法内联，所以在热
@@ -148,6 +156,12 @@ static void slot_release(int8_t slot)
             }
         }
         hidkit_emit_gamepad_abs(slot, 0, 0, 0, 0, 0, 0);
+        /* 六轴补发全零：消费方没有 umount 通知，补零就是"设备已离开"的信号
+         * （角速度若停在旧值上，做积分的解算器会永久漂移 —— 与补发"全部
+         * 松开"同一语义）。补零走完整链路（hook → input），钩子可在断连帧
+         * 做自己的清理；accel 全零语义是"失重"而非"静止"，只此一帧。 */
+        if (s_slot[slot].has_motion)
+            hidkit_emit_gamepad_motion(slot, 0, 0, 0, 0, 0, 0);
     }
 
     if ((caps & CAP_ANY_KB) && s_kb_count) s_kb_count--;
@@ -383,10 +397,15 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
             s_slot[slot].last_buttons = gs.buttons;
             s_slot[slot].btn_map = gs.btn_map;
             s_slot[slot].btn_count = gs.btn_count;
+            s_slot[slot].has_motion = gs.has_motion;
             /* 轴：每份解析成功的报文都回调（手柄报文即绝对状态） */
             hidkit_emit_gamepad_abs(slot, gs.ls_x, gs.ls_y, gs.rs_x, gs.rs_y,
                                     gs.lt, gs.rt);
-            return true;
+            /* 六轴：仅布局声明 has_motion 的报文回调（无 IMU 的手柄不发，
+             * 0 对陀螺仪是合法读数，不能伪造） */
+            if (gs.has_motion)
+                hidkit_emit_gamepad_motion(slot, gs.gyro_x, gs.gyro_y, gs.gyro_z,
+                                           gs.accel_x, gs.accel_y, gs.accel_z);            return true;
         }
 #if HIDKIT_ENABLE_ADAPTER_AZERON
         /* Azeron 这类双通道设备：轴走手柄通道（上面的 parse），键盘报文走固定格式。
