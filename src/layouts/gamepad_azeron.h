@@ -51,7 +51,7 @@ static inline bool azeron_match(uint16_t vid, uint16_t pid)
 
 // 解析 raw report → gamepad_state_t（无状态，每帧独立）
 // 同 ds5_parse：每报文，经函数指针调用，独立函数体要进 RAM
-static inline bool HIDKIT_HOT(azeron_parse)(const uint8_t *report, uint16_t len,
+static bool HIDKIT_HOT(azeron_parse)(const uint8_t *report, uint16_t len,
                                 gamepad_state_t *out)
 {
     if (!report || !out) return false;

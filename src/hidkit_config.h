@@ -95,8 +95,9 @@
  *
  * 默认展开为空，任何平台都能编译。展开式必须**连标识符一起吐出来**
  * （属性 + 名字），与 SDK 的 __not_in_flash_func 同构 —— 只给属性不给名字
- * 会在 `bool HIDKIT_HOT(foo)(int)` 处直接编译报错。static inline 的布局解析
- * 函数也照标不误：它们地址被取走，必然发射出独立函数体。
+ * 会在 `bool HIDKIT_HOT(foo)(int)` 处直接编译报错。布局解析函数用 **static
+ * 不用 static inline**：inline 与 __not_in_flash_func 冲突（Pico/树莓派上
+ * 标注会被丢掉）；它们地址被取走，本就发射独立函数体。
  *
  *   #define HIDKIT_HOT(f) __not_in_flash_func(f)                            // Pico SDK
  *   #define HIDKIT_HOT(f) __attribute__((section(".time_critical.hidkit"))) f // 裸属性

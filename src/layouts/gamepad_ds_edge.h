@@ -88,7 +88,7 @@ static inline bool ds_edge_match(uint16_t vid, uint16_t pid)
 // 报文结构与 DS5 完全一致（含 bit 20-23 的透传：ds5_parse 原样拷贝整个
 // 32bit 按键字，Edge 的附加位天然包含在内），故直接复用 ds5_parse，
 // 换成本布局的查表指针即可。
-static inline bool HIDKIT_HOT(ds_edge_parse)(const uint8_t *report, uint16_t len,
+static bool HIDKIT_HOT(ds_edge_parse)(const uint8_t *report, uint16_t len,
                               gamepad_state_t *out)
 {
     if (!ds5_parse(report, len, out)) return false;
