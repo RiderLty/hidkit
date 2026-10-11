@@ -66,11 +66,12 @@ void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
 }
 
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                              uint32_t buttons)
 {
     g_gp++;
-    printf("[EV] slot=%d PAD ls=(%d,%d) rs=(%d,%d) lt=%d rt=%d\n",
-           slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
+    printf("[EV] slot=%d PAD ls=(%d,%d) rs=(%d,%d) lt=%d rt=%d buttons=0x%08X\n",
+           slot, ls_x, ls_y, rs_x, rs_y, lt, rt, (unsigned)buttons);
     fflush(stdout);
 }
 

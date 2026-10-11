@@ -99,10 +99,11 @@ void hidkit_emit_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
 }
 
 void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                             int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
+                             int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                             uint32_t buttons)
 {
-    if (!hidkit_hook_gamepad_abs(&ls_x, &ls_y, &rs_x, &rs_y, &lt, &rt)) return;
-    hidkit_input_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt);
+    if (!hidkit_hook_gamepad_abs(&ls_x, &ls_y, &rs_x, &rs_y, &lt, &rt, &buttons)) return;
+    hidkit_input_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y, lt, rt, buttons);
 }
 
 void hidkit_emit_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
@@ -152,10 +153,11 @@ static void slot_release(int8_t slot)
         for (uint8_t i = 0; map && i < count && i < 32; i++) {
             if (s_slot[slot].last_buttons & (1u << i)) {
                 uint8_t code = (uint8_t)(map[i] & 0xFF);
+                if (!code) continue; // 未映射的保留位不能生成 0x0200 松开事件
                 hidkit_emit_key(slot, (uint16_t)(HIDKIT_CODE_GAMEPAD | code), false);
             }
         }
-        hidkit_emit_gamepad_abs(slot, 0, 0, 0, 0, 0, 0);
+        hidkit_emit_gamepad_abs(slot, 0, 0, 0, 0, 0, 0, 0);
         /* 六轴补发全零：消费方没有 umount 通知，补零就是"设备已离开"的信号
          * （角速度若停在旧值上，做积分的解算器会永久漂移 —— 与补发"全部
          * 松开"同一语义）。补零走完整链路（hook → input），钩子可在断连帧
@@ -383,13 +385,17 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
 
     if (caps & CAP_GAMEPAD) {
 #if HIDKIT_ENABLE_GAMEPAD
-        hidkit_gamepad_state_t gs;
+        /* 控制应答只表示命令完成，不能读取状态或覆盖按键/运动基线。
+         * Switch 的 0x21/0x81 由宿主握手模块处理，仍向宿主返回已消费。 */
+        if (gamepad_hid_is_reply(slot, buf, len)) return true;
+        hidkit_gamepad_state_t gs = {0};
         if (gamepad_hid_dispatch(slot, buf, len, &gs)) {
             /* 按键边沿 → 统一 key 出口（手柄段前缀 + BTN_*） */
             uint32_t changed = gs.buttons ^ s_slot[slot].last_buttons;
             for (uint8_t i = 0; i < gs.btn_count && i < 32; i++) {
                 if (changed & (1u << i)) {
                     uint8_t code = (uint8_t)(gs.btn_map[i] & 0xFF);
+                    if (!code) continue; // BTN 映射为 0 表示忽略该位
                     bool pressed = (gs.buttons >> i) & 1u;
                     hidkit_emit_key(slot, (uint16_t)(HIDKIT_CODE_GAMEPAD | code), pressed);
                 }
@@ -398,14 +404,15 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
             s_slot[slot].btn_map = gs.btn_map;
             s_slot[slot].btn_count = gs.btn_count;
             s_slot[slot].has_motion = gs.has_motion;
-            /* 轴：每份解析成功的报文都回调（手柄报文即绝对状态） */
+            /* 轴 + 原生按钮位图：每份解析成功的报文都回调（手柄报文即绝对状态） */
             hidkit_emit_gamepad_abs(slot, gs.ls_x, gs.ls_y, gs.rs_x, gs.rs_y,
-                                    gs.lt, gs.rt);
+                                    gs.lt, gs.rt, gs.buttons);
             /* 六轴：仅布局声明 has_motion 的报文回调（无 IMU 的手柄不发，
              * 0 对陀螺仪是合法读数，不能伪造） */
             if (gs.has_motion)
                 hidkit_emit_gamepad_motion(slot, gs.gyro_x, gs.gyro_y, gs.gyro_z,
-                                           gs.accel_x, gs.accel_y, gs.accel_z);            return true;
+                                           gs.accel_x, gs.accel_y, gs.accel_z);
+            return true;
         }
 #if HIDKIT_ENABLE_ADAPTER_AZERON
         /* Azeron 这类双通道设备：轴走手柄通道（上面的 parse），键盘报文走固定格式。
@@ -417,8 +424,8 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
 #endif
         if (!s_slot[slot].logged_unconsumed) {
             s_slot[slot].logged_unconsumed = true;
-            HIDKIT_LOG("hidkit: slot %d gamepad report not consumed (len=%u)\n",
-                       slot, (unsigned)len);
+            HIDKIT_LOG("hidkit: slot %d gamepad report not consumed (len=%u, id=0x%02X)\n",
+                       slot, (unsigned)len, (unsigned)buf[0]);
         }
         return false;   /* 认了设备但这份报文不认识 → 交宿主 */
 #else
@@ -501,7 +508,8 @@ bool HIDKIT_HOT(hidkit_xinput_report)(int8_t slot, const hidkit_xinput_pad_t *pa
     int32_t const rs_y = -(int32_t)pad->ry;
     hidkit_emit_gamepad_abs(slot, ls_x, ls_y, rs_x, rs_y,
                             (int32_t)pad->left_trigger  * HIDKIT_XINPUT_TRIGGER_SCALE,
-                            (int32_t)pad->right_trigger * HIDKIT_XINPUT_TRIGGER_SCALE);
+                            (int32_t)pad->right_trigger * HIDKIT_XINPUT_TRIGGER_SCALE,
+                            buttons);
     return true;
 #endif
 }

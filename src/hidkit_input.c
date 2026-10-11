@@ -40,7 +40,8 @@ HIDKIT_WEAK void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int
 
 HIDKIT_WEAK void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                                           int32_t rs_x, int32_t rs_y,
-                                          int32_t lt, int32_t rt)
+                                          int32_t lt, int32_t rt,
+                                          uint32_t buttons)
 {
     (void)slot;
     (void)ls_x;
@@ -49,6 +50,7 @@ HIDKIT_WEAK void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_
     (void)rs_y;
     (void)lt;
     (void)rt;
+    (void)buttons;
 }
 
 HIDKIT_WEAK void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy,

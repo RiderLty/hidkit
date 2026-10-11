@@ -26,7 +26,8 @@ hidkit_umount(slot);                            /* 4. 卸载：库内先补发"�
 void hidkit_input_key(int8_t slot, uint16_t code, bool pressed);          /* 键/鼠/手柄按键统一出口 */
 void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                              uint32_t buttons);
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);       /* 可选诊断 */
 ```
 

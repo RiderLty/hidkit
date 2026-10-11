@@ -99,7 +99,8 @@ void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 
 /* 手柄绝对状态：每份解析成功的报文都回调（手柄报文即绝对状态，不做去重） */
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                              uint32_t buttons);
 
 /* 手柄六轴运动数据（陀螺仪 + 加速度计）。量程约定见下节 */
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
@@ -141,9 +142,10 @@ slot 用来区分设备（多键盘/多鼠标各占一个）。不定义这些�
 1. **DS5/DS Edge 原始计数即该比例**（±32768 ↔ 满量程），`ds5_parse` 直通即可；
    其他布局按上表公式缩放到 `-32767..32767`。
 2. **钳位**：raw = -32768 时钳到 -32767（值域闭区间，与摇杆约定一致）。
-3. **轴序与符号 = 设备原生透传，不做重映射**（DS5 参考：X=俯仰 pitch、
-   Y=偏航 yaw、Z=横滚 roll）。消费方自行映射。
-4. **加速度含重力**：静止正面朝上时 accel_z ≈ ∓8192（∓1 g）。零偏与重力
+3. **DS5、DS Edge 与 Switch Pro 使用相同坐标系**（X=俯仰 pitch、
+   Y=偏航 yaw、Z=横滚 roll）。Pro 校准后按 `(-Y, Z, -X)` 转为 PlayStation
+   原生轴序；Joy-Con 保留原生坐标系，消费方按持握方式映射。
+4. **加速度含重力**：静止时重力向量模长约 8192（1 g）。零偏与重力
    补偿是消费方策略，库内不做。
 5. **`has_motion` 必须如实声明**：布局报文含有效六轴时置 1，否则恒 0。
    无 IMU 的手柄**不发**运动事件 —— 0 对陀螺仪是合法读数（"完全静止"），
