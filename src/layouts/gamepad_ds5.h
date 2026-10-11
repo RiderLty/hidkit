@@ -199,6 +199,26 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     out->btn_map   = ds5_button_map;
     out->btn_count = DS5_BTN_COUNT;
 
+    // --- 触摸板（两个触点槽位，偏移 32/36）---
+    // 12bit 手动解包（3 字节小端：x 低 8 位 + x 高 4 位/y 低 4 位 + y 高 8 位，
+    // 与 Switch 摇杆同构；不用 bitfield 避免布局移植性问题）。坐标 = 设备原生
+    // 0..1920 × 0..943，库内零换算（宽高比保真，换算是消费方策略）。
+    // 不透传 tracking counter：同槽位换手指 = 触点位 down→up→down 序列可见。
+    out->has_touchpad = 1;
+    out->touchpad.meta = (2u << HIDKIT_TP_META_SLOTS_SHIFT)
+                       | (HIDKIT_TPSRC_DS5 << HIDKIT_TP_META_SOURCE_SHIFT);
+    out->touchpad.dims = 1920u | (943u << 16);
+    const struct touch_point *pts[2] = { &rpt->points_1, &rpt->points_2 };
+    for (unsigned i = 0; i < 2; i++) {
+        if (pts[i]->contact & 1u) {
+            out->touchpad.meta |= (1u << i);
+            out->touchpad.x[i] = (uint16_t)(pts[i]->raw[0]
+                                 | ((pts[i]->raw[1] & 0x0Fu) << 8));
+            out->touchpad.y[i] = (uint16_t)(((pts[i]->raw[1] >> 4) & 0x0Fu)
+                                 | (pts[i]->raw[2] << 4));
+        }
+    }
+
     return true;
 }
 

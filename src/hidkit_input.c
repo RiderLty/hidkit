@@ -66,6 +66,12 @@ HIDKIT_WEAK void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy
     (void)az;
 }
 
+HIDKIT_WEAK void hidkit_input_touchpad(int8_t slot, const hidkit_touchpad_t *tp)
+{
+    (void)slot;
+    (void)tp;
+}
+
 HIDKIT_WEAK void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid)
 {
     (void)slot;

@@ -62,6 +62,8 @@ static int      g_key_n;
 static struct { int32_t dx, dy, wheel; int n; } g_mouse;
 static struct { int32_t ls_x, ls_y, rs_x, rs_y, lt; uint32_t buttons; int n; } g_gp;
 static struct { int16_t gx, gy, gz, ax, ay, az; int n; } g_motion;
+static struct { uint32_t meta, dims; uint16_t x[HIDKIT_TOUCHPAD_SLOTS];
+                uint16_t y[HIDKIT_TOUCHPAD_SLOTS]; int n; } g_touchpad;
 /* 希望被钩子吞掉的六轴帧（声明在前，ev_reset 要清它）*/
 static bool g_motion_hook_swallow;
 
@@ -71,6 +73,7 @@ static void ev_reset(void)
     memset(&g_mouse, 0, sizeof(g_mouse));
     memset(&g_gp, 0, sizeof(g_gp));
     memset(&g_motion, 0, sizeof(g_motion));
+    memset(&g_touchpad, 0, sizeof(g_touchpad));
     g_motion_hook_swallow = false;
 }
 
@@ -99,6 +102,15 @@ void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz
     g_motion.gx = gx; g_motion.gy = gy; g_motion.gz = gz;
     g_motion.ax = ax; g_motion.ay = ay; g_motion.az = az;
     g_motion.n++;
+}
+void hidkit_input_touchpad(int8_t slot, const hidkit_touchpad_t *tp)
+{
+    (void)slot;
+    if (!tp) return;
+    g_touchpad.meta = tp->meta; g_touchpad.dims = tp->dims;
+    memcpy(g_touchpad.x, tp->x, sizeof(tp->x));
+    memcpy(g_touchpad.y, tp->y, sizeof(tp->y));
+    g_touchpad.n++;
 }
 
 /* 希望被钩子吞掉的 code（0 = 不吞）*/
@@ -837,6 +849,67 @@ static void test_hid_gamepad_ds5(void)
     CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
 }
 
+/* 触摸板快照通道（DS5）：触点解包 + meta/dims 自描述 + umount 补发全零。
+ * 报文布局：Report ID + 结构体，points_1 在结构体偏移 32（即 rpt[33] 起），
+ * points_2 偏移 36（rpt[37] 起）；每点 4 字节 = counter+contact + 12bit x + 12bit y。 */
+static void test_hid_touchpad_ds5(void)
+{
+    printf("触摸板快照（DS5）：双指坐标解包 + meta/dims + umount 补零\n");
+    ev_reset();
+
+    static const uint8_t k_placeholder_desc[] = { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0 };
+    hidkit_dev_info_t info = { .vid = 0x054c, .pid = 0x0ce6, .dev_addr = 12, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_placeholder_desc,
+                               .report_desc_len = sizeof(k_placeholder_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应认领为手柄，实得 %d", slot);
+
+    uint8_t rpt[64];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x01;      /* Report ID */
+    rpt[3] = 128; rpt[4] = 128;   /* 摇杆居中，避免杂音 */
+
+    /* 点 1：按下（counter=1），x=1920 y=943（满分辨率角点）
+     * 12bit 打包：x = raw[0] | (raw[1]&0x0F)<<8；y = (raw[1]>>4) | raw[2]<<4 */
+    rpt[33] = 0x81;                       /* bit0 按下 + counter=1 */
+    rpt[34] = 0x80; rpt[35] = 0xF7; rpt[36] = 0x3A;   /* x=1920, y=943 */
+    /* 点 2：按下（counter=0x43，LSB=按下），x=100 y=50 */
+    rpt[37] = 0x43;
+    rpt[38] = 0x64; rpt[39] = 0x20; rpt[40] = 0x03;   /* x=100, y=50 */
+
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
+    CHECK(g_touchpad.n == 1, "应回调一次触摸板快照，实得 %d", g_touchpad.n);
+    CHECK(g_touchpad.dims == (1920u | (943u << 16)),
+          "dims 应为 1920|943<<16，实得 0x%08lX", (unsigned long)g_touchpad.dims);
+    CHECK((g_touchpad.meta & HIDKIT_TP_META_CONTACTS_MASK) == 0x3,
+          "两触点都应在位，meta 触点位实得 0x%lX",
+          (unsigned long)(g_touchpad.meta & HIDKIT_TP_META_CONTACTS_MASK));
+    CHECK(((g_touchpad.meta & HIDKIT_TP_META_SLOTS_MASK) >> HIDKIT_TP_META_SLOTS_SHIFT) == 2,
+          "最大点数应为 2");
+    CHECK(((g_touchpad.meta & HIDKIT_TP_META_SOURCE_MASK) >> HIDKIT_TP_META_SOURCE_SHIFT)
+          == HIDKIT_TPSRC_DS5, "来源应为 DS5 枚举");
+    CHECK(g_touchpad.x[0] == 1920 && g_touchpad.y[0] == 943,
+          "点 1 应为 (1920,943)，实得 (%u,%u)", g_touchpad.x[0], g_touchpad.y[0]);
+    CHECK(g_touchpad.x[1] == 100 && g_touchpad.y[1] == 50,
+          "点 2 应为 (100,50)，实得 (%u,%u)", g_touchpad.x[1], g_touchpad.y[1]);
+    CHECK(g_touchpad.x[2] == 0 && g_touchpad.y[9] == 0,
+          "未用槽位坐标应恒 0");
+
+    /* 双指全抬：触点位清零、坐标归零（meta 的 slots/source 保持） */
+    rpt[33] = 0x02; rpt[34] = 0; rpt[35] = 0; rpt[36] = 0;    /* counter=1, bit0=0 抬起 */
+    rpt[37] = 0x42; rpt[38] = 0; rpt[39] = 0; rpt[40] = 0;
+    hidkit_report(slot, rpt, sizeof(rpt));
+    CHECK(g_touchpad.n == 2 && (g_touchpad.meta & HIDKIT_TP_META_CONTACTS_MASK) == 0,
+          "抬起后触点位应清零，实得 0x%lX",
+          (unsigned long)(g_touchpad.meta & HIDKIT_TP_META_CONTACTS_MASK));
+
+    /* umount：补发全零快照（"设备已离开"信号） */
+    hidkit_umount(slot);
+    CHECK(g_touchpad.n == 3 && g_touchpad.meta == 0 && g_touchpad.dims == 0,
+          "卸载应补发一次全零快照（meta/dims 全 0），n=%d", g_touchpad.n);
+}
+
 /* Switch Pro 的原生摇杆纵轴方向与 hidkit/DS5 输出约定相反：原始 Y 增大
  * 应输出负值，原始 Y 减小应输出正值。左右摇杆
  * 都必须遵守同一规则；X 轴和其他手柄布局不能受影响。 */
@@ -1446,6 +1519,7 @@ int main(void)
     hidkit_init();
     printf("== hidkit 主机侧样本测试 ==\n");
     test_hid_gamepad_ds5();
+    test_hid_touchpad_ds5();
     test_hid_gamepad_switch_stick_y();
     test_hid_gamepad_ds_edge();
     test_hid_gamepad_motion();

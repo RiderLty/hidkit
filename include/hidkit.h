@@ -64,6 +64,34 @@ typedef struct {
  * 配合 `__not_in_flash_func` 之类的标注）。
  *--------------------------------------------------------------------*/
 
+/*--------------------------------------------------------------------+
+ * 触摸板通用快照（DS5/DS Edge 起步，将来的触摸板设备共用同一格式）
+ *
+ * 快照 = 两个 32 位元字 + N 个坐标对；签名一次定格，设备差异全在字段里。
+ * 单个 32 位字装不下"10 触点 + 宽 + 高"（10+12+12 = 34 > 32），故拆两字。
+ *--------------------------------------------------------------------*/
+
+#define HIDKIT_TOUCHPAD_SLOTS 10   /* 编译期常量（非配置开关）：坐标对按槽位
+                                    * 顺序尾部追加，改小不影响已写的消费方脚本 */
+
+/* meta bit14-19 来源枚举（bit20-31 保留）。不发 PID/VID：触摸板场景
+ * 宽高 + 类型已覆盖全部实际需求，枚举仅为"同尺寸不同设备"留身份位。
+ * 新枚举按 1、2、3… 顺序分配，登记处 = 各布局的 parse。 */
+#define HIDKIT_TPSRC_DS5       0x00u   /* DS5 / DS Edge（1920 × 943，12bit 坐标） */
+
+#define HIDKIT_TP_META_CONTACTS_MASK  0x000003FFu  /* bit0-9 触点 i 在位 */
+#define HIDKIT_TP_META_SLOTS_SHIFT    10           /* bit10-13 最大点数 0..15 */
+#define HIDKIT_TP_META_SLOTS_MASK     0x00003C00u
+#define HIDKIT_TP_META_SOURCE_SHIFT   14           /* bit14-19 来源枚举 */
+#define HIDKIT_TP_META_SOURCE_MASK    0x000FC000u
+
+typedef struct {
+    uint32_t meta;                    /* 位域见上 */
+    uint32_t dims;                    /* bit0-15 宽 W ｜ bit16-31 高 H（设备原生） */
+    uint16_t x[HIDKIT_TOUCHPAD_SLOTS];
+    uint16_t y[HIDKIT_TOUCHPAD_SLOTS]; /* 无效槽位恒 0 */
+} hidkit_touchpad_t;
+
 /* 键盘 / 鼠标按键 / 手柄按键统一走这里，用 HIDKIT_CODE_* 段前缀区分类型。
  * 仅在状态变化时回调（边沿由库内检测）。 */
 void hidkit_input_key(int8_t slot, uint16_t code, bool pressed);
@@ -94,6 +122,17 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az);
 
+/* 触摸板快照（通用格式，DS5/DS Edge 及将来的触摸板设备共用此通道）：
+ * 每份解析成功的报文都会回调（不做去重 —— 静止手指的定频报文由消费方
+ * 去重，库内不理解内容）。设备卸载时补发一次全零快照（"设备已离开"信号，
+ * 与六轴补零同一语义）。
+ *
+ * meta 位域（bit0-9 触点在位；bit10-13 设备最大点数；bit14-19 来源枚举；
+ * bit20-31 保留，恒 0）。坐标 = 设备原生分辨率，库内零换算（宽高比保真），
+ * 无效槽位坐标恒 0。分辨率等设备常量随帧携带（dims），消费方无需查表。
+ * 不透传 tracking counter：同槽位换手指 = 触点位 down→up→down 序列可见。 */
+void hidkit_input_touchpad(int8_t slot, const hidkit_touchpad_t *tp);
+
 /* 可选诊断：设备被丢弃时（槽位耗尽且策略为 DROP_NEW）通知一次。 */
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 
@@ -114,6 +153,8 @@ typedef struct {
     int16_t  gyro_x, gyro_y, gyro_z;  /* ±32767 = ±2000 dps（量程约定见上） */
     int16_t  accel_x, accel_y, accel_z; /* ±32767 = ±4 g，静止时含重力 */
     uint8_t  has_motion;              /* 本报文含有效六轴数据（布局声明） */
+    uint8_t  has_touchpad;            /* 布局声明含触摸板（本报文 touchpad 有效） */
+    hidkit_touchpad_t touchpad;       /* 仅 has_touchpad=1 时有效 */
     uint32_t buttons;                 /* 设备原生位布局 */
     const uint16_t *btn_map;          /* 第 i 位 → BTN_* / DPAD_* */
     uint8_t  btn_count;

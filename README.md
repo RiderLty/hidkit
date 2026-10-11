@@ -138,6 +138,12 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az);
 
+/* 触摸板快照（通用格式，DS5/DS Edge 起步）。每份解析成功的报文都回调，
+ * 去重是消费方策略；umount 补发一次全零快照（"设备已离开"信号）。
+ * meta 位域：bit0-9 触点在位 / bit10-13 最大点数 / bit14-19 来源枚举；
+ * dims：bit0-15 宽 / bit16-31 高；坐标 = 设备原生分辨率，无效槽位恒 0 */
+void hidkit_input_touchpad(int8_t slot, const hidkit_touchpad_t *tp);
+
 /* 可选诊断：设备被丢弃时通知一次 */
 void hidkit_input_dropped(int8_t slot, uint16_t vid, uint16_t pid);
 ```

@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "hidkit.h"     /* hidkit_touchpad_t（触摸板钩子参数） */
+
 bool hidkit_hook_key(uint16_t *code, bool *pressed);
 bool hidkit_hook_mouse_abs(int32_t *dx, int32_t *dy, int32_t *wheel);
 bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y, int32_t *rs_x,
@@ -31,5 +33,9 @@ bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y, int32_t *rs_x,
  * 钩子可在断连帧做自己的清理；想屏蔽断连帧在此吞掉即可。 */
 bool hidkit_hook_gamepad_motion(int16_t *gx, int16_t *gy, int16_t *gz,
                                 int16_t *ax, int16_t *ay, int16_t *az);
+
+/* 触摸板快照（位域见 include/hidkit.h 的 hidkit_input_touchpad）。
+ * umount 补发的全零帧也经过这里。 */
+bool hidkit_hook_touchpad(hidkit_touchpad_t *tp);
 
 #endif /* HIDKIT_HOOKS_H */

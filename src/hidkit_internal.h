@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "hidkit.h"          /* hidkit_touchpad_t（触摸板快照） */
 #include "hidkit_config.h"
 
 /* 按键事件（键盘/鼠标按键/手柄按键，code 已含段前缀） */
@@ -28,6 +29,9 @@ void hidkit_emit_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
 /* 手柄六轴运动数据（仅带 IMU 的布局调用；umount 补发全零也走这里） */
 void hidkit_emit_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                 int16_t ax, int16_t ay, int16_t az);
+
+/* 触摸板快照（仅声明触摸板的布局每报文调用；umount 补发全零也走这里） */
+void hidkit_emit_touchpad(int8_t slot, const hidkit_touchpad_t *tp);
 
 /* 槽位是否仍在使用（解析层用它做早期返回，避免回调打到已卸载的槽位） */
 bool hidkit_slot_alive(int8_t slot);

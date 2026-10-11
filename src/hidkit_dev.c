@@ -62,6 +62,7 @@ typedef struct {
     const uint16_t *btn_map;               /* 手柄布局表（指向静态表，卸载时补发松开要用） */
     uint8_t  btn_count;
     bool     has_motion;                   /* 布局声明含六轴（卸载时补发全零要用） */
+    bool     has_touchpad;                 /* 布局声明含触摸板（卸载时补发全零要用） */
     uint32_t seq;                          /* 分配序号：EVICT_IDLE 的退化判据 */
     bool     logged_unconsumed;             /* 该槽位的「报文未消费」只报一次 */
 #if defined(HIDKIT_TICK_MS)
@@ -111,6 +112,13 @@ void hidkit_emit_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
 {
     if (!hidkit_hook_gamepad_motion(&gx, &gy, &gz, &ax, &ay, &az)) return;
     hidkit_input_gamepad_motion(slot, gx, gy, gz, ax, ay, az);
+}
+
+void hidkit_emit_touchpad(int8_t slot, const hidkit_touchpad_t *tp)
+{
+    hidkit_touchpad_t snap = *tp;
+    if (!hidkit_hook_touchpad(&snap)) return;
+    hidkit_input_touchpad(slot, &snap);
 }
 
 // 每份报文的第一个调用（hidkit_report 进来就查）。跨 TU 无法内联，所以在热
@@ -164,6 +172,12 @@ static void slot_release(int8_t slot)
          * 做自己的清理；accel 全零语义是"失重"而非"静止"，只此一帧。 */
         if (s_slot[slot].has_motion)
             hidkit_emit_gamepad_motion(slot, 0, 0, 0, 0, 0, 0);
+        /* 触摸板补发全零快照（"设备已离开"信号，与六轴补零同一语义；
+         * 消费方去重保证只在之前有触点时真正送达一次） */
+        if (s_slot[slot].has_touchpad) {
+            hidkit_touchpad_t zero = {0};
+            hidkit_emit_touchpad(slot, &zero);
+        }
     }
 
     if ((caps & CAP_ANY_KB) && s_kb_count) s_kb_count--;
@@ -404,6 +418,7 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
             s_slot[slot].btn_map = gs.btn_map;
             s_slot[slot].btn_count = gs.btn_count;
             s_slot[slot].has_motion = gs.has_motion;
+            s_slot[slot].has_touchpad = gs.has_touchpad;
             /* 轴 + 原生按钮位图：每份解析成功的报文都回调（手柄报文即绝对状态） */
             hidkit_emit_gamepad_abs(slot, gs.ls_x, gs.ls_y, gs.rs_x, gs.rs_y,
                                     gs.lt, gs.rt, gs.buttons);
@@ -412,6 +427,9 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
             if (gs.has_motion)
                 hidkit_emit_gamepad_motion(slot, gs.gyro_x, gs.gyro_y, gs.gyro_z,
                                            gs.accel_x, gs.accel_y, gs.accel_z);
+            /* 触摸板：仅布局声明触摸板的报文回调（每报文必发，去重是消费方策略） */
+            if (gs.has_touchpad)
+                hidkit_emit_touchpad(slot, &gs.touchpad);
             return true;
         }
 #if HIDKIT_ENABLE_ADAPTER_AZERON
