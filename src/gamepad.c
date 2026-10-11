@@ -61,6 +61,22 @@ const hidkit_switchpro_calib_t *switch_calib_of(int8_t slot)
     return &s_swcal[slot];
 }
 
+// Switch Pro 摇杆校准合理性：Nintendo 出厂校准中心 ≈2048（±300 量级），
+// 半量程是"相对中心的偏移"且不允许越过 12bit 边界。
+// 防线背景：国产手柄的出厂校准 SPI 区可能整片空白（NOR 擦除态 = 全 0xFF），
+// 12bit 解包出"中心 4095 / 半量程 4095"——数值上恰在合法边界内，必须用
+// "中心落在量程中段 + 偏移不越界"两道几何约束才能拦下。
+static bool sw_stick_calib_sane(uint16_t xc, uint16_t yc,
+                                uint16_t xmax, uint16_t xmin,
+                                uint16_t ymax, uint16_t ymin)
+{
+    if (xc < 1024u || xc > 3072u || yc < 1024u || yc > 3072u) return false;
+    if (xmax == 0 || xmin == 0 || ymax == 0 || ymin == 0) return false;
+    if (xmax > 4095u - xc || xmin > xc) return false;   // 满偏越过 12bit 上/下界
+    if (ymax > 4095u - yc || ymin > yc) return false;
+    return true;
+}
+
 bool hidkit_switchpro_set_calib(int8_t slot, const hidkit_switchpro_calib_t *cal)
 {
     if (slot < 0 || slot >= (int8_t)HIDKIT_MAX_SLOTS || !cal || !g_gp[slot].active)
@@ -70,13 +86,18 @@ bool hidkit_switchpro_set_calib(int8_t slot, const hidkit_switchpro_calib_t *cal
 
     // 合理性：12bit 中心越界 / 满偏为 0 的摇杆数据不可用
     if (cal->valid & HIDKIT_SWITCHPRO_CAL_STICKS) {
-        if (cal->ls_xc > 4095 || cal->ls_yc > 4095 ||
-            cal->rs_xc > 4095 || cal->rs_yc > 4095 ||
-            cal->ls_xmax == 0 || cal->ls_xmin == 0 ||
-            cal->ls_ymax == 0 || cal->ls_ymin == 0 ||
-            cal->rs_xmax == 0 || cal->rs_xmin == 0 ||
-            cal->rs_ymax == 0 || cal->rs_ymin == 0)
+        if (!sw_stick_calib_sane(cal->ls_xc, cal->ls_yc, cal->ls_xmax, cal->ls_xmin,
+                                 cal->ls_ymax, cal->ls_ymin) ||
+            !sw_stick_calib_sane(cal->rs_xc, cal->rs_yc, cal->rs_xmax, cal->rs_xmin,
+                                 cal->rs_ymax, cal->rs_ymin))
             return false;
+    }
+    // IMU 灵敏度系数必须为正：空白 SPI（全 0xFF）解出的 int16 为 -1，不可用
+    if (cal->valid & HIDKIT_SWITCHPRO_CAL_MOTION) {
+        for (unsigned i = 0; i < 3; i++) {
+            if (cal->acc_scale[i] <= 0 || cal->gyro_scale[i] <= 0)
+                return false;
+        }
     }
 
     s_swcal[slot] = *cal;

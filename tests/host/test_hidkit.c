@@ -970,6 +970,29 @@ static void test_hid_gamepad_switch_stick_y(void)
     CHECK(g_gp.ls_y == 32767 && g_gp.rs_y == -16383,
           "反向校准输出应正确，实得 ls_y=%d rs_y=%d", g_gp.ls_y, g_gp.rs_y);
 
+    /* 空白 SPI 回归：国产手柄出厂校准区可能整片未写入（NOR 全 0xFF）→
+     * 12bit 解包出"中心 4095 / 半量程 4095"，数值上恰在旧检查（>4095 拒）
+     * 边界内溜过 → 摇杆全垃圾（静止 raw 2048 被解析成 ≈-16379 → 视角模式
+     * 恒速漂移、满偏都拉不回来）。中心中段带 + 偏移不越界两道约束必须拦下。 */
+    hidkit_switchpro_calib_t blank = {
+        .valid = HIDKIT_SWITCHPRO_CAL_STICKS | HIDKIT_SWITCHPRO_CAL_MOTION,
+        .ls_xc = 4095, .ls_yc = 4095, .rs_xc = 4095, .rs_yc = 4095,
+        .ls_xmax = 4095, .ls_xmin = 4095, .ls_ymax = 4095, .ls_ymin = 4095,
+        .rs_xmax = 4095, .rs_xmin = 4095, .rs_ymax = 4095, .rs_ymin = 4095,
+        .acc_scale = {16384, 16384, 16384}, .gyro_scale = {13371, 13371, 13371},
+    };
+    CHECK(!hidkit_switchpro_set_calib(slot, &blank),
+          "空白 SPI 校准（全 0xFF 解出的中心 4095）应被拒绝");
+    /* 拒绝后行为核对：居中 raw（2048）必须输出 0——若垃圾校准被误用，
+     * (2048-4095)×8 会输出大负值 */
+    const uint16_t lc = 2048, rc = 2048;
+    sl[0] = (uint8_t)lc; sl[1] = (uint8_t)((lc >> 8) | (lc << 4)); sl[2] = (uint8_t)(lc >> 4);
+    sr[0] = (uint8_t)rc; sr[1] = (uint8_t)((rc >> 8) | (rc << 4)); sr[2] = (uint8_t)(rc >> 4);
+    hidkit_report(slot, rpt, sizeof(rpt));
+    CHECK(g_gp.ls_x == 0 && g_gp.ls_y == 0 && g_gp.rs_x == 0 && g_gp.rs_y == 0,
+          "拒绝垃圾校准后摇杆应回落缺省映射（居中=0），实得 ls=(%d,%d) rs=(%d,%d)",
+          g_gp.ls_x, g_gp.ls_y, g_gp.rs_x, g_gp.rs_y);
+
     hidkit_umount(slot);
 }
 
