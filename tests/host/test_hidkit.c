@@ -60,7 +60,7 @@ typedef struct {
 static key_ev_t g_key[MAX_EV];
 static int      g_key_n;
 static struct { int32_t dx, dy, wheel; int n; } g_mouse;
-static struct { int32_t ls_x, ls_y, lt; int n; } g_gp;
+static struct { int32_t ls_x, ls_y, lt; uint32_t buttons; int n; } g_gp;
 static struct { int16_t gx, gy, gz, ax, ay, az; int n; } g_motion;
 /* 希望被钩子吞掉的六轴帧（声明在前，ev_reset 要清它）*/
 static bool g_motion_hook_swallow;
@@ -85,10 +85,11 @@ void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel)
     g_mouse.dx = dx; g_mouse.dy = dy; g_mouse.wheel = wheel; g_mouse.n++;
 }
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt)
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                              uint32_t buttons)
 {
     (void)slot; (void)rs_x; (void)rs_y; (void)rt;
-    g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.lt = lt; g_gp.n++;
+    g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.lt = lt; g_gp.buttons = buttons; g_gp.n++;
 }
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az)

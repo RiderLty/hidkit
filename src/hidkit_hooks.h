@@ -23,7 +23,8 @@
 bool hidkit_hook_key(uint16_t *code, bool *pressed);
 bool hidkit_hook_mouse_abs(int32_t *dx, int32_t *dy, int32_t *wheel);
 bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y, int32_t *rs_x,
-                             int32_t *rs_y, int32_t *lt, int32_t *rt);
+                             int32_t *rs_y, int32_t *lt, int32_t *rt,
+                             uint32_t *buttons);
 
 /* 手柄六轴（陀螺仪 + 加速度计，量程约定见 include/hidkit.h 的
  * hidkit_input_gamepad_motion）。umount 补发的全零帧也经过这里，

@@ -178,7 +178,7 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     // 本身就是这个比例（±32768 ↔ 满量程），直通即可，仅钳掉 int16 负向多出
     // 的 -32768（值域闭区间 -32767..32767，与摇杆约定一致）。
     // 轴序 = 设备原生（X=俯仰 pitch、Y=偏航 yaw、Z=横滚 roll），符号不翻转；
-    // 加速度含重力（静止正面朝上 accel_z ≈ ∓8192 = ∓1 g），零偏归消费方。
+    // 加速度含重力（静止时重力模长 ≈8192 = 1 g），零偏归消费方。
     out->gyro_x  = (int16_t)(rpt->gyro_x  == -32768 ? -32767 : rpt->gyro_x);
     out->gyro_y  = (int16_t)(rpt->gyro_y  == -32768 ? -32767 : rpt->gyro_y);
     out->gyro_z  = (int16_t)(rpt->gyro_z  == -32768 ? -32767 : rpt->gyro_z);

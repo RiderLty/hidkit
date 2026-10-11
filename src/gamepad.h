@@ -92,6 +92,9 @@ bool gamepad_hid_dispatch(int8_t slot,
                           const uint8_t *report, uint16_t len,
                           gamepad_state_t *out_state);
 
+/* 已知布局的控制应答：已消费，但不含新的输入状态，不触发事件。 */
+bool gamepad_hid_is_reply(int8_t slot, const uint8_t *report, uint16_t len);
+
 /**
  * @brief 查询槽位是否有已解析的活跃手柄
  */

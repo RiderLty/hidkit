@@ -29,7 +29,8 @@ HIDKIT_WEAK bool hidkit_hook_mouse_abs(int32_t *dx, int32_t *dy, int32_t *wheel)
 
 HIDKIT_WEAK bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y,
                                          int32_t *rs_x, int32_t *rs_y,
-                                         int32_t *lt, int32_t *rt)
+                                         int32_t *lt, int32_t *rt,
+                                         uint32_t *buttons)
 {
     (void)ls_x;
     (void)ls_y;
@@ -37,6 +38,7 @@ HIDKIT_WEAK bool hidkit_hook_gamepad_abs(int32_t *ls_x, int32_t *ls_y,
     (void)rs_y;
     (void)lt;
     (void)rt;
+    (void)buttons;
     return true;
 }
 

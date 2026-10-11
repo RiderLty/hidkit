@@ -72,9 +72,11 @@ void hidkit_input_key(int8_t slot, uint16_t code, bool pressed);
 void hidkit_input_mouse_abs(int8_t slot, int32_t dx, int32_t dy, int32_t wheel);
 
 /* 手柄绝对状态：每份解析成功的报文都会回调（不做去重 —— 手柄报文本身
- * 就是当前绝对状态）。 */
+ * 就是当前绝对状态）。buttons = 手柄原生位图（第 i 位 = btn_map[i]），
+ * 键类变化另有 key 事件；这里带全量位图是为了让消费方可以整帧显示。 */
 void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
-                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt);
+                              int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
+                              uint32_t buttons);
 
 /* 手柄六轴运动数据（陀螺仪 + 加速度计）：每份含六轴的解析成功报文都会回调
  * （不做去重）。仅带 IMU 的手柄（如 DS5/DS Edge）会回调；无 IMU 的手柄
@@ -85,9 +87,10 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
  * 量程约定（基准 = DS5 满量程，与摇杆 -32767..32767 约定同构）：
  *   陀螺仪：±32767 = ±HIDKIT_MOTION_GYRO_FULL_SCALE_DPS (±2000 dps)
  *   加速度：±32767 = ±4 g（1 g ≈ 8192）；静止时含重力分量（正面朝上
- *           accel_z ≈ ∓8192），零偏与重力补偿是消费方策略，库内不做。
- *   轴序与符号 = 设备原生透传，库内不做重映射（DS5 参考：X=俯仰
- *   pitch、Y=偏航 yaw、Z=横滚 roll）。 */
+ *           重力模长 ≈8192），重力补偿是消费方策略，库内不做。
+ *   DS5 / DS Edge 使用 PlayStation 原生轴序；Switch Pro 六轴统一转换为
+ *   此坐标系（native X/Y/Z → output -Y/Z/-X）。Joy-Con 保留原生坐标系。
+ *   角速度 X=俯仰 pitch、Y=偏航 yaw、Z=横滚 roll。 */
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az);
 
@@ -124,6 +127,41 @@ typedef struct {
     uint8_t  right_trigger; /* 0..255 */
     int16_t  lx, ly, rx, ry;
 } hidkit_xinput_pad_t;
+
+/*--------------------------------------------------------------------+
+ * Switch Pro 校准数据注入（057e:2009/2006/2007）
+ *
+ * 手柄的摇杆/六轴出厂即未校准，工厂/用户校准存在手柄 SPI flash 里，
+ * 由宿主（握手模块）经子命令 0x10 读回后注入。地址与解码依据
+ * dekuNukem/Nintendo_Switch_Reverse_Engineering 与 Linux hid-nintendo：
+ *   - 摇杆 12bit 原始值域 0..4095，min/max 为**相对中心的偏移**；
+ *   - IMU 先按每轴 SPI 灵敏度换算为物理量，再归一化并限幅：
+ *     gyro_dps = (raw - origin) * 936 / (scale - origin)；
+ *     accel_g = raw * 4 / (scale - origin)，保留重力。
+ *     无校准时 scale 缺省为 gyro=13371、accel=16384。
+ * 未注入（或未含对应 valid 位）时布局用缺省映射（中心 2048、半量程 1024、
+ * 零偏 0）——流先出来，校准到位后自动变准。
+ *--------------------------------------------------------------------*/
+
+#define HIDKIT_SWITCHPRO_CAL_STICKS 0x01u
+#define HIDKIT_SWITCHPRO_CAL_MOTION 0x02u
+
+typedef struct {
+    uint16_t valid;        /* HIDKIT_SWITCHPRO_CAL_* 位组合 */
+    /* 摇杆：中心绝对值 + 满偏（相对中心的偏移，12bit） */
+    uint16_t ls_xc, ls_yc, ls_xmax, ls_xmin, ls_ymax, ls_ymin;
+    uint16_t rs_xc, rs_yc, rs_xmax, rs_xmin, rs_ymax, rs_ymin;
+    /* SPI origin：acc 用于灵敏度分母，gyro 同时作为静止零偏 */
+    int16_t  acc_origin[3];
+    int16_t  gyro_origin[3];
+    int16_t  acc_hoffset[3]; /* 平放参考值（含重力），仅保留元数据，不从输出扣除 */
+    int16_t  acc_scale[3];  /* SPI +6：灵敏度系数，缺省 16384 */
+    int16_t  gyro_scale[3]; /* SPI +18：灵敏度系数，缺省 13371 */
+} hidkit_switchpro_calib_t;
+
+/* 注入校准（按槽位）。槽位未由本库持有 / 非手柄 / 数据不合理（中心越界、
+ * 满偏为 0）返回 false。卸载与槽位复用时库内自动失效。 */
+bool hidkit_switchpro_set_calib(int8_t slot, const hidkit_switchpro_calib_t *cal);
 
 /*--------------------------------------------------------------------+
  * 入口
