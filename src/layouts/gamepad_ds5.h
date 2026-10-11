@@ -23,7 +23,7 @@ extern "C" {
  *--------------------------------------------------------------------*/
 
 struct touch_point {
-    uint8_t contact;    /* bit7 = 手指按下；bit0-6 = 触点计数器（勿按 bit0 判按下） */
+    uint8_t contact;    /* bit7 = 抬起标志(1=不在)；bit0-6 = 触点计数器 */
     union {
         uint8_t raw[3];   /* 12bit x + 12bit y（小端 nibble 打包，见 ds5_parse） */
         struct {
@@ -200,10 +200,10 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     out->btn_count = DS5_BTN_COUNT;
 
     // --- 触摸板（两个触点槽位，偏移 32/36）---
-    // 触点包格式（PS5 规范 / Linux hid-playstation 同款）：Byte0 bit7=手指按下
-    // （**不是 bit0**——bit0-6 是触点计数器，按 bit0 判会随计数器奇偶半数失灵）、
-    // Byte1=X 低 8 位、Byte2 低 nibble=X 高 4 位/高 nibble=Y 低 4 位、Byte3=Y 高 8 位，
-    // 与 Switch 摇杆打包同构；手动解包不用 bitfield 避免布局移植性问题。
+    // 触点包格式（与 DS4 同构，pico_ds5_ctrl 真机基准）：Byte0 **bit7=抬起标志**
+    // （1=手指不在，0=触摸中）、bit0-6=触点计数器；Byte1=X 低 8 位、Byte2 低
+    // nibble=X 高 4 位/高 nibble=Y 低 4 位、Byte3=Y 高 8 位（=bitfield x:12,y:12
+    // 的小端展开）；手动解包不用 bitfield 避免布局移植性问题。
     // 坐标 = 设备原生 0..1920 × 0..943，库内零换算（宽高比保真，换算是消费方策略）。
     // 不透传 tracking counter：同槽位换手指 = 触点位 down→up→down 序列可见。
     out->has_touchpad = 1;
@@ -212,7 +212,7 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     out->touchpad.dims = 1920u | (943u << 16);
     const struct touch_point *pts[2] = { &rpt->points_1, &rpt->points_2 };
     for (unsigned i = 0; i < 2; i++) {
-        if (pts[i]->contact & 0x80u) {
+        if ((pts[i]->contact & 0x80u) == 0u) {   // bit7=0 触摸中（1=抬起标志）
             out->touchpad.meta |= (1u << i);
             out->touchpad.x[i] = (uint16_t)(pts[i]->raw[0]
                                  | ((pts[i]->raw[1] & 0x0Fu) << 8));

@@ -870,14 +870,14 @@ static void test_hid_touchpad_ds5(void)
     rpt[0] = 0x01;      /* Report ID */
     rpt[3] = 128; rpt[4] = 128;   /* 摇杆居中，避免杂音 */
 
-    /* 点 1：按下（counter=5），x=1920 y=943（满分辨率角点）
-     * 触点包按 PS5 规范：Byte0 bit7=按下、bit0-6=计数器；坐标
-     * 12bit 打包：x = raw[0] | (raw[1]&0x0F)<<8；y = (raw[1]>>4) | raw[2]<<4 */
-    rpt[33] = 0x85;                       /* bit7 按下 + counter=5 */
+    /* 点 1：触摸中（counter=5），x=1920 y=943（满分辨率角点）
+     * 触点包与 DS4 同构：Byte0 **bit7=抬起标志**（0=触摸中）、bit0-6=计数器；
+     * 坐标 12bit 打包：x = raw[0] | (raw[1]&0x0F)<<8；y = (raw[1]>>4) | raw[2]<<4 */
+    rpt[33] = 0x05;                       /* counter=5, bit7=0 触摸中 */
     rpt[34] = 0x80; rpt[35] = 0xF7; rpt[36] = 0x3A;   /* x=1920, y=943 */
-    /* 点 2：按下（counter=0x42，**偶数**——回归用例：按下位是 bit7 不是 bit0，
-     * 旧实现按 bit0 判会随计数器奇偶半数失灵） */
-    rpt[37] = 0xC2;
+    /* 点 2：触摸中（counter=0x42，**偶数**——回归用例：判定基于 bit7 而非
+     * 计数器奇偶，旧实现按 bit0/bit7=1 判都会随计数器值失灵） */
+    rpt[37] = 0x42;
     rpt[38] = 0x64; rpt[39] = 0x20; rpt[40] = 0x03;   /* x=100, y=50 */
 
     CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "报文应被消费");
@@ -898,9 +898,9 @@ static void test_hid_touchpad_ds5(void)
     CHECK(g_touchpad.x[2] == 0 && g_touchpad.y[9] == 0,
           "未用槽位坐标应恒 0");
 
-    /* 双指全抬：bit7=0（counter 照常递增），触点位清零、坐标归零 */
-    rpt[33] = 0x06; rpt[34] = 0; rpt[35] = 0; rpt[36] = 0;    /* counter=6, bit7=0 抬起 */
-    rpt[37] = 0x42; rpt[38] = 0; rpt[39] = 0; rpt[40] = 0;
+    /* 双指全抬：bit7=1（抬起标志），触点位清零、坐标归零 */
+    rpt[33] = 0x86; rpt[34] = 0; rpt[35] = 0; rpt[36] = 0;    /* counter=6, bit7=1 抬起 */
+    rpt[37] = 0xC2; rpt[38] = 0; rpt[39] = 0; rpt[40] = 0;
     hidkit_report(slot, rpt, sizeof(rpt));
     CHECK(g_touchpad.n == 2 && (g_touchpad.meta & HIDKIT_TP_META_CONTACTS_MASK) == 0,
           "抬起后触点位应清零，实得 0x%lX",
