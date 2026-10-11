@@ -28,7 +28,8 @@
  *   加速度：g = raw * 4 / (scale - origin)，再映射到 ±4 g（超出则截断）。
  *   加速度含重力；SPI 水平参考值不作为零偏扣除。换算参考 SDL Switch HIDAPI。
  *   Pro 经 gamepad_hid_dispatch 将六轴 (-Y, Z, -X) 对齐 DS5 坐标系；
- *   本文件先在原生轴上完成校准，Joy-Con 保留原生轴序。
+ *   摇杆 Y 轴按 hidkit 的通用手柄约定取反（上推为正）；本文件先在原生轴上
+ *   完成校准，Joy-Con 也使用同一输出约定。
  */
 
 #ifndef GAMEPAD_SWITCH_H
@@ -194,15 +195,17 @@ static bool HIDKIT_HOT(sw_parse)(const uint8_t *report, uint16_t len,
     out->ls_x = sw_axis(lx, have_stick ? cal->ls_xc    : SW_STICK_MID,
                            have_stick ? cal->ls_xmax : SW_STICK_HALF,
                            have_stick ? cal->ls_xmin : SW_STICK_HALF);
-    out->ls_y = sw_axis(ly, have_stick ? cal->ls_yc    : SW_STICK_MID,
-                           have_stick ? cal->ls_ymax : SW_STICK_HALF,
-                           have_stick ? cal->ls_ymin : SW_STICK_HALF);
+    // Switch 原生 Y 轴与 DS5/通用手柄的 Y 方向相反；校准仍按原始方向选取
+    // max/min，最后只翻转归一化结果，避免不对称量程时交换校准边界。
+    out->ls_y = -sw_axis(ly, have_stick ? cal->ls_yc    : SW_STICK_MID,
+                            have_stick ? cal->ls_ymax : SW_STICK_HALF,
+                            have_stick ? cal->ls_ymin : SW_STICK_HALF);
     out->rs_x = sw_axis(rx, have_stick ? cal->rs_xc    : SW_STICK_MID,
                            have_stick ? cal->rs_xmax : SW_STICK_HALF,
                            have_stick ? cal->rs_xmin : SW_STICK_HALF);
-    out->rs_y = sw_axis(ry, have_stick ? cal->rs_yc    : SW_STICK_MID,
-                           have_stick ? cal->rs_ymax : SW_STICK_HALF,
-                           have_stick ? cal->rs_ymin : SW_STICK_HALF);
+    out->rs_y = -sw_axis(ry, have_stick ? cal->rs_yc    : SW_STICK_MID,
+                            have_stick ? cal->rs_ymax : SW_STICK_HALF,
+                            have_stick ? cal->rs_ymin : SW_STICK_HALF);
 
     // --- 扳机：无模拟量，ZL/ZR 数字位合成 0 / 满量程 ---
     out->lt = (rpt->btn_l & 0x80) ? 32767 : 0;
