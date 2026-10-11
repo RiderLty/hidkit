@@ -60,7 +60,7 @@ typedef struct {
 static key_ev_t g_key[MAX_EV];
 static int      g_key_n;
 static struct { int32_t dx, dy, wheel; int n; } g_mouse;
-static struct { int32_t ls_x, ls_y, lt; uint32_t buttons; int n; } g_gp;
+static struct { int32_t ls_x, ls_y, rs_x, rs_y, lt; uint32_t buttons; int n; } g_gp;
 static struct { int16_t gx, gy, gz, ax, ay, az; int n; } g_motion;
 /* 希望被钩子吞掉的六轴帧（声明在前，ev_reset 要清它）*/
 static bool g_motion_hook_swallow;
@@ -88,8 +88,9 @@ void hidkit_input_gamepad_abs(int8_t slot, int32_t ls_x, int32_t ls_y,
                               int32_t rs_x, int32_t rs_y, int32_t lt, int32_t rt,
                               uint32_t buttons)
 {
-    (void)slot; (void)rs_x; (void)rs_y; (void)rt;
-    g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.lt = lt; g_gp.buttons = buttons; g_gp.n++;
+    (void)slot; (void)rt;
+    g_gp.ls_x = ls_x; g_gp.ls_y = ls_y; g_gp.rs_x = rs_x; g_gp.rs_y = rs_y;
+    g_gp.lt = lt; g_gp.buttons = buttons; g_gp.n++;
 }
 void hidkit_input_gamepad_motion(int8_t slot, int16_t gx, int16_t gy, int16_t gz,
                                  int16_t ax, int16_t ay, int16_t az)
@@ -836,6 +837,67 @@ static void test_hid_gamepad_ds5(void)
     CHECK(!hidkit_is_active(slot), "卸载后槽位应释放");
 }
 
+/* Switch Pro 的原生摇杆纵轴方向与 hidkit/DS5 输出约定相反：原始 Y 增大
+ * 应输出负值，原始 Y 减小应输出正值。左右摇杆
+ * 都必须遵守同一规则；X 轴和其他手柄布局不能受影响。 */
+static void test_hid_gamepad_switch_stick_y(void)
+{
+    printf("HID 手柄布局（Switch Pro 057e:2009）：左右摇杆 Y 轴符号\n");
+    ev_reset();
+
+    static const uint8_t k_placeholder_desc[] = { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0 };
+    hidkit_dev_info_t info = { .vid = 0x057e, .pid = 0x2009, .dev_addr = 14, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_placeholder_desc,
+                               .report_desc_len = sizeof(k_placeholder_desc) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "Switch Pro 应被认领为手柄，实得 %d", slot);
+    if (slot < 0) return;
+
+    uint8_t rpt[49];
+    memset(rpt, 0, sizeof(rpt));
+    rpt[0] = 0x30;
+    rpt[3] = 0x00; /* btn_r */
+    rpt[4] = 0x00; /* btn_shared */
+    rpt[5] = 0x00; /* btn_l */
+    /* stick_l: X=center, Y=+1024 from center; stick_r: X=center, Y=-1024. */
+    const uint16_t lx = 2048, ly = 3072, rx = 2048, ry = 1024;
+    uint8_t *sl = &rpt[6];
+    sl[0] = (uint8_t)lx; sl[1] = (uint8_t)((lx >> 8) | (ly << 4)); sl[2] = (uint8_t)(ly >> 4);
+    uint8_t *sr = &rpt[9];
+    sr[0] = (uint8_t)rx; sr[1] = (uint8_t)((rx >> 8) | (ry << 4)); sr[2] = (uint8_t)(ry >> 4);
+
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "Switch Pro 报文应被消费");
+    CHECK(g_gp.n == 1, "应回调一次手柄状态，实得 %d", g_gp.n);
+    CHECK(g_gp.ls_x == 0 && g_gp.ls_y == -32767 &&
+          g_gp.rs_x == 0 && g_gp.rs_y == 32767,
+          "左右摇杆 Y 轴应取反，实得 ls=(%d,%d) rs=(%d,%d)",
+          g_gp.ls_x, g_gp.ls_y, g_gp.rs_x, g_gp.rs_y);
+
+    /* 不对称校准：正负原始方向仍分别使用 ymax/ymin，再翻转符号。
+     * 同一报文的左杆达到正原始满偏、右杆达到负原始半偏。 */
+    hidkit_switchpro_calib_t cal = {
+        .valid = HIDKIT_SWITCHPRO_CAL_STICKS,
+        .ls_xc = 2048, .ls_yc = 2048, .rs_xc = 2048, .rs_yc = 2048,
+        .ls_xmax = 1024, .ls_xmin = 1024, .ls_ymax = 1024, .ls_ymin = 512,
+        .rs_xmax = 1024, .rs_xmin = 1024, .rs_ymax = 512, .rs_ymin = 2048,
+    };
+    CHECK(hidkit_switchpro_set_calib(slot, &cal), "不对称摇杆校准应被接受");
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "校准后报文应被消费");
+    CHECK(g_gp.ls_y == -32767 && g_gp.rs_y == 16383,
+          "应保留原生校准方向，实得 ls_y=%d rs_y=%d", g_gp.ls_y, g_gp.rs_y);
+
+    /* 交换上下方向：左杆负原始满偏，右杆正原始半偏。 */
+    const uint16_t ly2 = 1536, ry2 = 2304;
+    sl[1] = (uint8_t)((lx >> 8) | (ly2 << 4)); sl[2] = (uint8_t)(ly2 >> 4);
+    sr[1] = (uint8_t)((rx >> 8) | (ry2 << 4)); sr[2] = (uint8_t)(ry2 >> 4);
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "反向报文应被消费");
+    CHECK(g_gp.ls_y == 32767 && g_gp.rs_y == -16383,
+          "反向校准输出应正确，实得 ls_y=%d rs_y=%d", g_gp.ls_y, g_gp.rs_y);
+
+    hidkit_umount(slot);
+}
+
 /* DS Edge（054c:0df2）：报文布局与 DS5 完全一致，但 PID 不同且 bit 20-23
  * 多出四个附加按键（内核 hid-playstation.c 的 buttons[2] bit4-7 =
  * FN1/FN2/左背键/右背键 → 报文字节 10 的 bit4-7）。
@@ -1384,6 +1446,7 @@ int main(void)
     hidkit_init();
     printf("== hidkit 主机侧样本测试 ==\n");
     test_hid_gamepad_ds5();
+    test_hid_gamepad_switch_stick_y();
     test_hid_gamepad_ds_edge();
     test_hid_gamepad_motion();
     test_boot_keyboard();
