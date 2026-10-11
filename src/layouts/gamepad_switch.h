@@ -28,8 +28,8 @@
  *   加速度：g = raw * 4 / (scale - origin)，再映射到 ±4 g（超出则截断）。
  *   加速度含重力；SPI 水平参考值不作为零偏扣除。换算参考 SDL Switch HIDAPI。
  *   Pro 经 gamepad_hid_dispatch 将六轴 (-Y, Z, -X) 对齐 DS5 坐标系；
- *   摇杆 Y 轴按 hidkit 的通用手柄约定取反（上推为正）；本文件先在原生轴上
- *   完成校准，Joy-Con 也使用同一输出约定。
+ *   摇杆 Y 轴校准后取反，统一为上推负、下拉正。六轴先在原生轴上完成校准，
+ *   Joy-Con 的六轴保留原生轴序。
  */
 
 #ifndef GAMEPAD_SWITCH_H

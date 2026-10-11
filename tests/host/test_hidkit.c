@@ -838,7 +838,7 @@ static void test_hid_gamepad_ds5(void)
 }
 
 /* Switch Pro 的原生摇杆纵轴方向与 hidkit/DS5 输出约定相反：原始 Y 增大
- * （摇杆向下）应输出负值，原始 Y 减小（摇杆向上）应输出正值。左右摇杆
+ * 应输出负值，原始 Y 减小应输出正值。左右摇杆
  * 都必须遵守同一规则；X 轴和其他手柄布局不能受影响。 */
 static void test_hid_gamepad_switch_stick_y(void)
 {
@@ -873,6 +873,27 @@ static void test_hid_gamepad_switch_stick_y(void)
           g_gp.rs_x == 0 && g_gp.rs_y == 32767,
           "左右摇杆 Y 轴应取反，实得 ls=(%d,%d) rs=(%d,%d)",
           g_gp.ls_x, g_gp.ls_y, g_gp.rs_x, g_gp.rs_y);
+
+    /* 不对称校准：正负原始方向仍分别使用 ymax/ymin，再翻转符号。
+     * 同一报文的左杆达到正原始满偏、右杆达到负原始半偏。 */
+    hidkit_switchpro_calib_t cal = {
+        .valid = HIDKIT_SWITCHPRO_CAL_STICKS,
+        .ls_xc = 2048, .ls_yc = 2048, .rs_xc = 2048, .rs_yc = 2048,
+        .ls_xmax = 1024, .ls_xmin = 1024, .ls_ymax = 1024, .ls_ymin = 512,
+        .rs_xmax = 1024, .rs_xmin = 1024, .rs_ymax = 512, .rs_ymin = 2048,
+    };
+    CHECK(hidkit_switchpro_set_calib(slot, &cal), "不对称摇杆校准应被接受");
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "校准后报文应被消费");
+    CHECK(g_gp.ls_y == -32767 && g_gp.rs_y == 16383,
+          "应保留原生校准方向，实得 ls_y=%d rs_y=%d", g_gp.ls_y, g_gp.rs_y);
+
+    /* 交换上下方向：左杆负原始满偏，右杆正原始半偏。 */
+    const uint16_t ly2 = 1536, ry2 = 2304;
+    sl[1] = (uint8_t)((lx >> 8) | (ly2 << 4)); sl[2] = (uint8_t)(ly2 >> 4);
+    sr[1] = (uint8_t)((rx >> 8) | (ry2 << 4)); sr[2] = (uint8_t)(ry2 >> 4);
+    CHECK(hidkit_report(slot, rpt, sizeof(rpt)), "反向报文应被消费");
+    CHECK(g_gp.ls_y == 32767 && g_gp.rs_y == -16383,
+          "反向校准输出应正确，实得 ls_y=%d rs_y=%d", g_gp.ls_y, g_gp.rs_y);
 
     hidkit_umount(slot);
 }
