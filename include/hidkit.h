@@ -248,6 +248,18 @@ bool hidkit_is_gamepad(int8_t slot);
 /* 兼容查询：当前是否有键盘/鼠标在线（0=无 1=键盘 2=鼠标；键鼠同在报鼠标）。 */
 uint8_t hidkit_device_type(void);
 
+/* 槽位主类型查询（宿主的设备清单/面板展示用）：返回 HIDKIT_SLOTKIND_*。
+ * slot 越界或空闲返回 HIDKIT_SLOTKIND_NONE。判定以报告描述符语义为准，
+ * 比宿主侧的 boot 接口协议声明（tuh_hid_interface_protocol）可靠。 */
+enum {
+    HIDKIT_SLOTKIND_NONE = 0,
+    HIDKIT_SLOTKIND_MOUSE,
+    HIDKIT_SLOTKIND_KEYBOARD,
+    HIDKIT_SLOTKIND_GAMEPAD,
+    HIDKIT_SLOTKIND_NKRO,
+};
+uint8_t hidkit_slot_kind(int8_t slot);
+
 /* 未接管返回值 */
 #define HIDKIT_UNHANDLED   (-1)
 #define HIDKIT_ERR_NO_SLOT (-2)

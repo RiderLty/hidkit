@@ -549,3 +549,15 @@ uint8_t hidkit_device_type(void)
     if (s_kb_count) return HIDKIT_PROTO_KEYBOARD;
     return HIDKIT_PROTO_NONE;
 }
+
+uint8_t hidkit_slot_kind(int8_t slot)
+{
+    if (slot < 0 || slot >= (int8_t)HIDKIT_MAX_SLOTS) return HIDKIT_SLOTKIND_NONE;
+    switch (s_slot[slot].kind) {
+    case SLOT_MOUSE:    return HIDKIT_SLOTKIND_MOUSE;
+    case SLOT_KEYBOARD: return HIDKIT_SLOTKIND_KEYBOARD;
+    case SLOT_GAMEPAD:  return HIDKIT_SLOTKIND_GAMEPAD;
+    case SLOT_NKRO:     return HIDKIT_SLOTKIND_NKRO;
+    default:            return HIDKIT_SLOTKIND_NONE;
+    }
+}
