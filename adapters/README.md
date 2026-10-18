@@ -30,6 +30,11 @@ git submodule add https://github.com/RiderLty/hidkit-tusb-xinput.git lib/hidkit-
   的 `src/hidkit_app.c`。
 - 适配器**不要**在 core 的出口函数之外另开一条输出路径：事件一律经
   `hidkit_input_key()` / `hidkit_input_gamepad_abs()` 出去，消费方只认这一套。
+- 适配器**可以**（可选）提供应用层**观测钩子**（weak 空实现，消费方定义强符号即整体
+  覆盖）：像 XInput 这类不经 HID 回调路径的设备类别，宿主侧的设备清单/面板统计想
+  看见它们只能从这里拿事件（挂载的 vid/pid/itf、拔出、报文计数）。钩子必须**纯观测**
+  —— 无返回值、不控制流程、宿主不实现也不影响接入。实例见 hidkit-tusb-xinput
+  glue 的 `hid_devinfo_xinput_mount/umount/count`。
 
 ## 已有 / 计划中的适配器
 
@@ -42,6 +47,14 @@ XInput 的**布局与归一化**已经在 core 里（`src/hidkit_dev.c` 的 `hid
 按钮位 → `BTN_*` 查表、扳机阈值合成数字位、Y 轴取反、模拟值缩放），所以适配器只需要把
 厂商报文解析成 `hidkit_xinput_pad_t` 并调用它即可 —— 这也意味着**换 USB 栈不需要重写
 任何归一化逻辑**。
+
+### hidkit-tusb-xinput 的版本血脉（2026-10-18 起）
+
+该仓库的 `main` 已开始跟进 TinyUSB 0.19+（`xinputh_open()` 返回消费长度的适配），
+仍钉在 TinyUSB 0.18 血脉的工程（如 pico-hid-mapper，Pico SDK 2.3.0）**不能直接跟
+main**。为此另开了 **`firmware` 分支**（`29d2419` 起）：0.18 血脉 + 上文约定的三个
+weak 观测钩子。子模块更新到该适配器时先分清血脉：0.19+ 工程 → `main`；
+0.18 工程 → `firmware`。
 
 ## 写一个新适配器要做什么
 
