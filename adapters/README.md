@@ -48,13 +48,12 @@ XInput 的**布局与归一化**已经在 core 里（`src/hidkit_dev.c` 的 `hid
 厂商报文解析成 `hidkit_xinput_pad_t` 并调用它即可 —— 这也意味着**换 USB 栈不需要重写
 任何归一化逻辑**。
 
-### hidkit-tusb-xinput 的版本血脉（2026-10-18 起）
+### hidkit-tusb-xinput 的版本血脉（2026-10-18 合流）
 
-该仓库的 `main` 已开始跟进 TinyUSB 0.19+（`xinputh_open()` 返回消费长度的适配），
-仍钉在 TinyUSB 0.18 血脉的工程（如 pico-hid-mapper，Pico SDK 2.3.0）**不能直接跟
-main**。为此另开了 **`firmware` 分支**（`29d2419` 起）：0.18 血脉 + 上文约定的三个
-weak 观测钩子。子模块更新到该适配器时先分清血脉：0.19+ 工程 → `main`；
-0.18 工程 → `firmware`。
+`main` 自 `b291229` 起同时携带 TinyUSB 0.19+ 的 `xinputh_open()` 适配与上文约定的
+三个 weak 观测钩子，两者不同文件、互不依赖；0.18 血脉（Pico SDK 2.3.0）已实测可编。
+早期曾把 0.18 工程引到 `firmware` 分支，合流后不再需要（保留仅作存档）。
+子模块照常跟 `main` 即可。
 
 ## 写一个新适配器要做什么
 
