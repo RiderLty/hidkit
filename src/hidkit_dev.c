@@ -65,6 +65,9 @@ typedef struct {
     bool     has_touchpad;                 /* 布局声明含触摸板（卸载时补发全零要用） */
     uint32_t seq;                          /* 分配序号：EVICT_IDLE 的退化判据 */
     bool     logged_unconsumed;             /* 该槽位的「报文未消费」只报一次 */
+    uint16_t boot_kb_bits;                  /* CAP_KB_BOOT 且描述符可读时，描述符声明的
+                                             * 该 Report 总位宽（0 = 不校验） */
+    uint8_t  boot_kb_id;                    /* CAP_KB_BOOT 时该 Report 的 ID（0 = 无前缀） */
 #if defined(HIDKIT_TICK_MS)
     uint32_t last_tick;                    /* 最近一次收到报文的时刻 */
 #endif
@@ -155,6 +158,7 @@ static void slot_release(int8_t slot)
     hid_dispatch_reset(slot);            /* boot 键鼠的补发松开（固定鼠标按键也在这里） */
 
     if (caps & CAP_GAMEPAD) {
+#if HIDKIT_ENABLE_GAMEPAD
         /* 手柄按键补发松开（按布局表查回 BTN_* 再走统一 key 出口），轴归零 */
         const uint16_t *map = s_slot[slot].btn_map;
         uint8_t count = s_slot[slot].btn_count;
@@ -178,6 +182,12 @@ static void slot_release(int8_t slot)
             hidkit_touchpad_t zero = {0};
             hidkit_emit_touchpad(slot, &zero);
         }
+        /* 清掉手柄模块自己的状态（parse 指针 / active / Switch 校准）。
+         * 不调它的话：卸载后 gamepad_is_active() 仍为真，槽位被复用成键盘后
+         * valid_gp_pid_vid() 仍按旧手柄匹配，hidkit_switchpro_set_calib() 对
+         * 已释放的槽位继续返回 true —— 与 hidkit.h 的"卸载后自动失效"契约相反。 */
+        gamepad_hid_umount(slot);
+#endif
     }
 
     if ((caps & CAP_ANY_KB) && s_kb_count) s_kb_count--;
@@ -232,7 +242,15 @@ static void slot_touch(int8_t slot)
 
 void hidkit_init(void)
 {
-    for (int8_t i = 0; i < (int8_t)HIDKIT_MAX_SLOTS; i++) slot_clear(i);
+    /* 先复位边沿检测状态，再清槽位。
+     * 只清槽位是不够的：hid_dispatch.c 的 s_edge[] 与 gamepad.c 的 g_gp[]
+     * 是各自模块的静态状态，slot_clear() 不碰它们。按着键调 hidkit_init()、
+     * 再重挂同一设备、再按同一个键 → 旧实现零事件（边沿被判成"未变化"）。 */
+    for (int8_t i = 0; i < (int8_t)HIDKIT_MAX_SLOTS; i++) {
+        hid_dispatch_reset(i);
+        gamepad_hid_umount(i);
+        slot_clear(i);
+    }
     s_alloc_seq = 0;
     s_kb_count = 0;
     s_mouse_count = 0;
@@ -252,10 +270,22 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
 
     /* --- 先判定能力集（不认识就不占槽位）--- */
     uint8_t caps = 0;
+    uint16_t boot_kb_bits = 0;               /* 描述符声明的 boot 键盘报文位宽 */
+    uint8_t  boot_kb_id   = 0;               /* 该报文是否有 Report ID 前缀 */
 
+#if HIDKIT_ENABLE_GAMEPAD
     if (dev->proto == HIDKIT_PROTO_GAMEPAD) {
         caps = CAP_GAMEPAD;                   /* 适配器（如 XInput）已确认是手柄 */
     }
+#else
+    /* 手柄支持被裁掉：不能认领 proto=GAMEPAD —— 认了却没有任何解析器接手，
+     * 槽位被永久占住且 hidkit_report() 恒返回 false（比交宿主更糟）。 */
+    if (dev->proto == HIDKIT_PROTO_GAMEPAD) {
+        HIDKIT_LOG("hidkit: gamepad support disabled, skip %04x:%04x\n",
+                   dev->vid, dev->pid);
+        return HIDKIT_UNHANDLED;
+    }
+#endif
 #if HIDKIT_ENABLE_GAMEPAD
     else if (dev->proto == HIDKIT_PROTO_NONE && has_desc &&
              gamepad_hid_match(dev->vid, dev->pid)) {
@@ -272,26 +302,51 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
             caps |= CAP_KB_NKRO;              /* 描述符里有键盘键位段 */
         }
 
-        /* 鼠标能力的认领：proto 明确是 Mouse，或描述符里有 Mouse/Pointer 顶层集合
-         * （键盘+鼠标复合接口常只写 proto=Keyboard/0）。后者要求确实解析出鼠标
-         * 字段，避免空认领。proto==NONE 且描述符像手柄（Joystick/Gamepad 集合）
-         * 时这里不会命中 —— 未知手柄不会被误判成鼠标。 */
-        bool mouse_like = (dev->proto == HIDKIT_PROTO_MOUSE);
-        if (!mouse_like &&
-            hid_desc_has_mouse_collection(dev->report_desc, dev->report_desc_len)) {
+        /* 鼠标能力的认领：描述符里有 Mouse/Pointer 顶层集合（键盘+鼠标复合
+         * 接口常只写 proto=Keyboard/0），或 proto 明确是 Mouse（描述符可能
+         * 只截到了不完整的一部分）。两条路都要求确实解析出鼠标字段 ——
+         * 认了却解析不出字段，报文会被静默消费掉（既不出事件、也不交宿主），
+         * 比不认领更糟。 */
+        bool mouse_like = hid_desc_has_mouse_collection(dev->report_desc,
+                                                        dev->report_desc_len) ||
+                          dev->proto == HIDKIT_PROTO_MOUSE;
+        if (mouse_like) {
             hid_mouse_desc_t md;
             memset(&md, 0, sizeof(md));
-            mouse_like = hid_mouse_parse(&md, dev->report_desc, dev->report_desc_len) &&
-                         mouse_desc_usable(&md);
-        }
-        if (mouse_like) {
-            caps |= CAP_MOUSE_DESC;
+            if (hid_mouse_parse(&md, dev->report_desc, dev->report_desc_len) &&
+                mouse_desc_usable(&md)) {
+                caps |= CAP_MOUSE_DESC;
+            } else if (dev->proto == HIDKIT_PROTO_MOUSE) {
+                /* 描述符没读懂却自称鼠标（厂商私有格式 / 描述符截断）：
+                 * 回落到固定 8 字节格式，而不是空认领。 */
+                caps |= CAP_MOUSE_BOOT;
+            }
         }
 
         if (caps == 0) {
             /* 描述符里没有本库认识的集合（或宿主只抓到了一部分）→ 回落到 proto。
-             * MOUSE 已在上面认领，走到这里的只可能是 KEYBOARD（描述符解析失败）。 */
-            if (dev->proto == HIDKIT_PROTO_KEYBOARD)      caps = CAP_KB_BOOT;
+             * MOUSE 已在上面认领，走到这里的只可能是 KEYBOARD（描述符解析失败）。
+             * 回落是"描述符没读懂"的下策，必须先确认描述符**确实声明了键盘集合**：
+             * 描述符通篇没有键盘 collection 的接口（Consumer/厂商集合）不是键盘，
+             * 谎报的 proto 不能让我们把它的报文解码成按键。
+             * 同时记下描述符声明的键盘报文位宽，报文长度不符时同样不解。 */
+            if (dev->proto == HIDKIT_PROTO_KEYBOARD) {
+                hid_report_len_t lb[HID_REPORT_LEN_TABLE];
+                uint8_t const n = hid_desc_report_bits(dev->report_desc,
+                                                       dev->report_desc_len,
+                                                       lb, HID_REPORT_LEN_TABLE);
+                for (uint8_t i = 0; i < n; i++) {
+                    if (lb[i].bits_kb) {
+                        caps = CAP_KB_BOOT;
+                        boot_kb_bits = lb[i].bits_kb;  /* 键盘页 Input 的位宽 */
+                        boot_kb_id   = lb[i].id;
+                        break;
+                    }
+                }
+                HIDKIT_LOG("hidkit: boot fallback %04x:%04x -> %s (kb bits=%u)\n",
+                           dev->vid, dev->pid, caps ? "kb" : "none",
+                           (unsigned)boot_kb_bits);
+            }
         }
     } else {
         /* 无描述符（超过枚举缓冲 / 固定格式设备）：proto 是唯一线索 */
@@ -325,6 +380,8 @@ int8_t hidkit_mount(const hidkit_dev_info_t *dev)
     s_slot[slot].itf = dev->itf;
     s_slot[slot].proto = dev->proto;
     s_slot[slot].seq = ++s_alloc_seq;
+    s_slot[slot].boot_kb_bits = boot_kb_bits;
+    s_slot[slot].boot_kb_id = boot_kb_id;
 
     /* --- 按能力做挂载期解析 --- */
     if (caps & CAP_GAMEPAD) {
@@ -363,21 +420,35 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
     uint8_t const caps = s_slot[slot].caps;
 
     /* 一个接口可能带多种集合（多 Report ID 复合描述符）：按报文首字节
-     * （Report ID）路由。 */
-    bool const kb_ok = (caps & CAP_KB_NKRO) &&
-                       hid_nkro_accepts(&s_nkro[slot], buf, len);
-    bool const ms_ok = (caps & CAP_MOUSE_DESC) &&
-                       hid_mouse_accepts(&s_mouse[slot], buf, len);
+     * （Report ID）路由，再用描述符声明的报文长度复核 —— 长度不够的报文
+     * 连自己的字段都装不下，绝不能拿去解（真机 BE EF → dx=-4162）。 */
+    uint8_t const kb_score = (caps & CAP_KB_NKRO)
+                           ? hid_nkro_match(&s_nkro[slot], buf, len) : 0;
+    uint8_t const ms_score = (caps & CAP_MOUSE_DESC)
+                           ? hid_mouse_match(&s_mouse[slot], buf, len) : 0;
+    bool const kb_ok = kb_score > 0;
+    bool const ms_ok = ms_score > 0;
 
-    /* 键鼠共用一个显式 Report ID（同一份报文里既有键位段又有鼠标字段）：
+    /* 键鼠共用一份报文（同一个显式 Report ID，或描述符根本不用 Report ID）：
      * 两份解析器各自按自己的位偏移处理本报文 —— 对齐 Linux hid-input 的
      * 逐字段模型，不能"键盘优先"把鼠标那半边吃掉。
-     * 只有二者都由显式 Report ID 命中时才并行；没有 Report ID 的描述符里
-     * 键鼠报文无法区分，仍按键盘优先（否则会把键盘报文当鼠标轴读）。 */
-    if (kb_ok && ms_ok && hid_nkro_uses_report_id(&s_nkro[slot]) &&
-        hid_mouse_uses_report_id(&s_mouse[slot])) {
+     *
+     * 能走到这里的先决条件已经是**长度校验通过**：不用 Report ID 的描述符
+     * 只有一种报文长度（所有集合合在一份报文里），键盘与鼠标看到的是同一条
+     * 长度判据，所以两者同时命中正说明这份报文确实同时携带两类字段。 */
+    if (kb_ok && ms_ok && kb_score == ms_score) {
         hid_nkro_dispatch(slot, &s_nkro[slot], buf, len);
         hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
+        return true;
+    }
+    if (kb_ok && ms_ok) {
+        /* 长度只有一方精确吻合（同一接口上键鼠各用一段位宽、整体长度可兼容）：
+         * 精确吻合的一方胜出。 */
+        if (ms_score > kb_score) {
+            hid_mouse_dispatch(slot, &s_mouse[slot], buf, len);
+        } else {
+            hid_nkro_dispatch(slot, &s_nkro[slot], buf, len);
+        }
         return true;
     }
     if (kb_ok) {
@@ -389,12 +460,45 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
         return true;
     }
     if (caps & CAP_KB_BOOT) {
-        hid_dispatch_keyboard(slot, buf, (uint8_t)len);
-        return true;
+        bool decode = true;
+        const uint8_t *body = buf;
+        uint16_t body_len = len;
+        uint16_t const kb_bits = s_slot[slot].boot_kb_bits;
+        uint8_t const kb_id = s_slot[slot].boot_kb_id;
+
+        if (kb_id) {
+            /* 描述符里键盘集合带 Report ID：报文首字节必须是它 */
+            decode = (len >= 1 && buf[0] == kb_id);
+            if (decode) {
+                body = buf + 1;
+                body_len = (uint16_t)(len - 1);
+            }
+        }
+        if (decode && kb_bits) {
+            /* 描述符可读：boot 解码器只认 2 个修饰键字节 + 键码数组的布局，
+             * 报文必须装得下描述符声明的键盘数据体。短报文（同一接口上的
+             * 鼠标/厂商报文）交给宿主，不能解码成按键。 */
+            uint16_t const want = (uint16_t)((kb_bits + 7u) / 8u);
+            decode = (want != 0 && body_len >= want);
+        } else if (decode) {
+            /* 描述符不可读：只能按 boot 键盘报文的合法长度校验（HID 规范
+             * 6~8 字节，含 2 修饰键字节的变体）。更短的报文不可能是键盘报文。 */
+            decode = (body_len >= 6 && body_len <= 8);
+        }
+        /* boot 解码器的 len 参数是 uint8_t：>= 256 的报文会被截断成低 8 位
+         * （264 → 8），随后被当成一份合法的 boot 报文解出假位移/假按键。
+         * 长度校验用的是未截断的 body_len，所以这里必须先挡住。 */
+        if (decode && body_len <= 255) {
+            hid_dispatch_keyboard(slot, body, (uint8_t)body_len);
+            return true;
+        }
     }
     if (caps & CAP_MOUSE_BOOT) {
-        hid_dispatch_mouse(slot, buf, (uint8_t)len);
-        return true;
+        /* 同上：固定 8 字节格式只认 len == 8，截断会让 264 字节报文变成 8 */
+        if (len <= 255) {
+            hid_dispatch_mouse(slot, buf, (uint8_t)len);
+            return true;
+        }
     }
 
     if (caps & CAP_GAMEPAD) {
@@ -435,7 +539,8 @@ bool HIDKIT_HOT(hidkit_report)(int8_t slot, const uint8_t *buf, uint16_t len)
 #if HIDKIT_ENABLE_ADAPTER_AZERON
         /* Azeron 这类双通道设备：轴走手柄通道（上面的 parse），键盘报文走固定格式。
          * 其键盘报文长度与厂商报文不同 → parse 失败 → 这里按 VID:PID 兜住。 */
-        if (s_slot[slot].vid == 0x16D0 && s_slot[slot].pid == 0x13EA && len > 1) {
+        if (s_slot[slot].vid == 0x16D0 && s_slot[slot].pid == 0x13EA &&
+            len > 1 && len - 1 <= 255) {
             hid_dispatch_keyboard(slot, buf + 1, (uint8_t)(len - 1));  /* 跳过 report ID */
             return true;
         }
@@ -478,7 +583,10 @@ bool hidkit_umount(int8_t slot)
  * 出口与 HID 手柄完全同路（同一 key 段前缀 + 同一 gamepad_abs）。
  *--------------------------------------------------------------------*/
 
-/* XInput 标准位 → BTN_*（下标 = XINPUT_GAMEPAD_* 的位序号） */
+/* XInput 标准位 → BTN_*（下标 = XINPUT_GAMEPAD_* 的位序号）。
+ * 只在手柄功能打开时用到 —— 关掉 HIDKIT_ENABLE_GAMEPAD 后整段入口走空返回，
+ * 这张表不再被引用，留着会触发 -Wunused-const-variable（-Werror 下编不过）。 */
+#if HIDKIT_ENABLE_GAMEPAD
 static const uint16_t k_xinput_btn_map[18] = {
     DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT,          /* 0-3  */
     BTN_START, BTN_SELECT, BTN_LS, BTN_RS,              /* 4-7  */
@@ -486,6 +594,7 @@ static const uint16_t k_xinput_btn_map[18] = {
     BTN_A, BTN_B, BTN_X, BTN_Y,                         /* 12-15 */
     BTN_LT, BTN_RT,                                     /* 16-17：由模拟扳机阈值合成 */
 };
+#endif  /* HIDKIT_ENABLE_GAMEPAD */
 
 /* 模拟扳机 → 数字按键的阈值（与既有实现一致：0..255 中取 102） */
 #define HIDKIT_XINPUT_TRIGGER_THRESHOLD 102
@@ -508,6 +617,12 @@ bool HIDKIT_HOT(hidkit_xinput_report)(int8_t slot, const hidkit_xinput_pad_t *pa
     uint32_t buttons = pad->buttons;
     if (pad->left_trigger >= HIDKIT_XINPUT_TRIGGER_THRESHOLD)  buttons |= (1u << 16);
     if (pad->right_trigger >= HIDKIT_XINPUT_TRIGGER_THRESHOLD) buttons |= (1u << 17);
+
+    /* 记下布局表：卸载/挤出时 slot_release() 靠 btn_map 把按住的键补发松开。
+     * 不填的话 map 为 NULL，松开循环整个跳过 —— 实测按住 A+Start 卸载后
+     * 0 个松开事件，上层映射引擎里这些键永久卡在按下。 */
+    s_slot[slot].btn_map = k_xinput_btn_map;
+    s_slot[slot].btn_count = 18;
 
     uint32_t changed = buttons ^ s_slot[slot].last_buttons;
     for (uint8_t i = 0; i < 18; i++) {

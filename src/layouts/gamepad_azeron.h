@@ -62,8 +62,9 @@ static bool HIDKIT_HOT(azeron_parse)(const uint8_t *report, uint16_t len,
     memcpy(&rpt_buf, report, sizeof(rpt_buf));
     const struct azeron_input_report *rpt = &rpt_buf;
     memset(out, 0, sizeof(*out));
-    out->ls_x = ((int32_t)rpt->ls_x - 512 ) << 6 ; // 中心化
-    out->ls_y = ((int32_t)rpt->ls_y - 512) << 6 ; // 中心化
+    // 中心化 + ×64（用乘法而非 `<< 6`：左移负数是 UB，见 gamepad_ds5.h 同处注释）
+    out->ls_x = ((int32_t)rpt->ls_x - 512) * 64;
+    out->ls_y = ((int32_t)rpt->ls_y - 512) * 64;
     return true;
 }
 
