@@ -94,9 +94,12 @@ void HIDKIT_HOT(hid_dispatch_keyboard)(int8_t slot, const uint8_t *report, uint8
     }
 
     // --- 普通键按下检测（当前帧有、上帧没有）---
-    for (uint8_t i = 0; i < key_count && keys[i]; i++) {
+    // 0 是"空槽"而不是"结束标记"：部分键盘按固定槽位上报（中间留空），
+    // 遇到第一个 0 就 break 会把后面的键整批丢掉（真机：{04,00,05} 只出 a）。
+    for (uint8_t i = 0; i < key_count; i++) {
+        if (keys[i] == 0) continue;               // 空槽
         bool found = false;
-        for (uint8_t j = 0; j < HIDKIT_MAX_KEYS_PER_KB && st->last_keyboard_keys[j]; j++) {
+        for (uint8_t j = 0; j < HIDKIT_MAX_KEYS_PER_KB; j++) {
             if (st->last_keyboard_keys[j] == keys[i]) {
                 found = true;
                 break;
@@ -108,9 +111,10 @@ void HIDKIT_HOT(hid_dispatch_keyboard)(int8_t slot, const uint8_t *report, uint8
     }
 
     // --- 普通键释放检测（上帧有、当前帧没有）---
-    for (uint8_t i = 0; i < HIDKIT_MAX_KEYS_PER_KB && st->last_keyboard_keys[i]; i++) {
+    for (uint8_t i = 0; i < HIDKIT_MAX_KEYS_PER_KB; i++) {
+        if (st->last_keyboard_keys[i] == 0) continue;   // 空槽
         bool found = false;
-        for (uint8_t j = 0; j < key_count && keys[j]; j++) {
+        for (uint8_t j = 0; j < key_count; j++) {
             if (keys[j] == st->last_keyboard_keys[i]) {
                 found = true;
                 break;
@@ -145,8 +149,9 @@ void hid_dispatch_reset(int8_t slot)
         }
     }
 
-    // 普通键释放
-    for (uint8_t i = 0; i < HIDKIT_MAX_KEYS_PER_KB && st->last_keyboard_keys[i]; i++) {
+    // 普通键释放（0 是空槽，不能当结束标记 —— 中间留空的槽位会截断后面的键）
+    for (uint8_t i = 0; i < HIDKIT_MAX_KEYS_PER_KB; i++) {
+        if (st->last_keyboard_keys[i] == 0) continue;
         hidkit_emit_key(slot, (uint16_t)(HIDKIT_CODE_KEYBOARD | st->last_keyboard_keys[i]), false);
     }
 

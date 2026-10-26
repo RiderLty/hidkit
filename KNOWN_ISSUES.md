@@ -17,6 +17,13 @@
 **NKRO 数组段的松开漏检**（第 8 条把 boot 风格键盘改走描述符路径后暴露出来的
 既有缺陷）。
 
+最近的现场反馈（没碰鼠标但光标一直飞、鼠标按键被识别成键盘按键）又定位到一条
+（11）：**报文长度完全没校验**。描述符声明的是多少位，报文就应该是多少字节；
+不校验的话 2 字节杂报文会被当成 11 字节鼠标报文解出天文位移，同接口上的鼠标报文
+也会被 boot 键盘解码器读成按键。修法是把描述符声明的长度变成硬判据
+（对齐 Linux `hid_report_raw_event()` 的 "was too short" 拒收；内核新旧版本
+在此分别返回 -EINVAL / 补零，本库只取前者）。
+
 ## 已修复
 
 ### 1. usage range 的循环上界用错（原影响最大）
@@ -172,7 +179,8 @@ ID=4 的键盘报文进 `hid_mouse_dispatch()` 后不匹配任何鼠标字段 �
 
 - 修法：判定改为**描述符优先**。`hidkit_mount()` 只要拿到描述符就解析出**能力集**
   （`CAP_KB_NKRO` / `CAP_MOUSE_DESC` / `CAP_GAMEPAD`），槽位保存能力位；
-  `hidkit_report()` 按报文首字节（Report ID）路由，键盘优先、其次鼠标。
+  `hidkit_report()` 按报文首字节（Report ID）路由，键盘优先、其次鼠标
+  （第 11 条之后改为按描述符声明的报文长度择优）。
   `hid_nkro_accepts()` / `hid_mouse_accepts()` 是新增的路由判据。
   proto 只在描述符缺失、或描述符里没有本库认识的集合时兜底。
   已知手柄的 VID:PID 匹配仍排在描述符解析之前（手柄描述符里也有 Generic Desktop
@@ -191,7 +199,6 @@ ID=4 的键盘报文进 `hid_mouse_dispatch()` 后不匹配任何鼠标字段 �
   → 键鼠都出事件，且 Gamepad 集合的描述符仍返回未消费。
 
 ### 9. NKRO 数组段的松开漏检
-
 数组段（`Report Size 8` 的 keycode 数组，6KRO / boot 风格描述符）的报文只列出
 **当前按着的键**，松开的键不再出现。旧 `hid_nkro_dispatch()` 的数组分支只对本帧
 出现的 keycode 调 `nkro_key_edge()`：
@@ -229,6 +236,135 @@ NKRO shadow 里、也不在 `hid_dispatch` 的 slot 状态里 —— 于是"按�
 - 用例：`test_mouse_umount_release()`（样本），以及真机 gadget 的
   `tests/linux/verify_gadget.py` case A/B（断言卸载后的 `MOUSE ... up`）。
 
+### 11. 报文长度不校验：2 字节杂报文被当成 11 字节鼠标报文（真机"光标乱飞"）
+
+现场现象（`QIN_LOG/加载日志2`）：**没碰鼠标，鼠标信号每秒 187 次持续输出**，
+`STATUS fps≈3700`。HIDRAW 抓到的报文全是 2 字节：
+
+```
+conn=2 addr=2 itf=1 rid=00 id=0 len=2 trunc=0 data=BE EF
+```
+
+该接口（ROG OMNI RECEIVER `0b05:1ace` itf=1）的描述符是无 Report ID 的 **11 字节**
+鼠标：5 个按键位 + 3 位补齐 + **16 位 X / 16 位 Y** + 8 位滚轮 + 5 字节厂商段。
+`hid_field_read()` 只有**字段级**越界检查（`end_byte > report_len` 才返回 0）：
+X 字段占 bit 8..23，在 2 字节报文里"读得到" → `0xEFBE` 符号扩展成 **-4162**，
+Y 同理 → 每帧一个天文位移。
+
+- 根因：把"字段读得到"当成了"报文是给我的"。描述符声明的报文长度才是权威判据
+  —— Linux `hid_report_raw_event()` 正是这样拒收 `report N was too short` 的报文。
+- 修法：
+  - 新增 `hid_report_len_t` + `hid_desc_report_bits()`（`src/hid_parser.c`）：
+    解析描述符时为**每个 Report ID** 累计 Input item 的位宽（Output/Feature 不计），
+    并按最外层 Application Collection 归类成键盘/鼠标/其它；
+    `hid_mouse_desc_t` / `hid_nkro_desc_t` 各存一张表（`HID_REPORT_LEN_TABLE = 8`）。
+  - `hid_mouse_accepts()` / `hid_nkro_accepts()` 改为 `hid_mouse_match()` /
+    `hid_nkro_match()`（返回 0/1/2 = 不属于/长度够/长度精确吻合）：
+    **无 Report ID 的描述符不再无条件接受**，报文必须装得下描述符声明的总位宽。
+  - `hidkit_report()` 的路由去掉"键盘优先"：两份解析器同时命中时按匹配强度择优，
+    强度相同（不用 Report ID 的描述符 = 键鼠字段在同一份报文里）则**并行**处理；
+    没有 Report ID 且长度判据也无法区分的报文不再猜成键盘。
+  - `CAP_KB_BOOT` 兜底不再无条件解码：描述符可读时要求报文装得下键盘位宽，
+    描述符不可读时要求 6~8 字节（boot 键盘报文的合法长度）；并且**描述符里必须
+    真的声明了键盘集合**才允许按谎报的 `proto=Keyboard` 兜底。
+  - 鼠标认领不再允许"认领了却解析不出字段"：`proto=Mouse` 但描述符没读懂时回落到
+    固定 8 字节格式（`CAP_MOUSE_BOOT`），而不是把报文静默吞掉。
+- 用例：`test_report_len_table()`、`test_mouse_short_report_rejected()`（现场 `BE EF`）、
+  `test_idless_kb_mouse_composite()`（无 ID 键鼠同报文：两份解析器并行、短报文交宿主）、
+  `test_boot_fallback_length_guard()`（boot 兜底 + 谎报 proto 的 Consumer 接口不认领）、
+  `test_win60_composite_regression()`（真机 WIN60 itf1 的 Mouse ID=2 / Keyboard ID=5）。
+  修复前现场报文会产生 `dx=-4162` 的 mouse 事件、2 字节报文会解出 0xE0/0xE5/0xFB 按键。
+
+### 12. boot 键盘把键码槽里的 0 当"结束标记"，空槽之后的键全丢
+
+固定格式（boot 协议 / `CAP_KB_BOOT`）键盘的键码数组里，**0 表示"这一槽没有键"，
+不是"后面都没有键"**。旧实现两个循环都写成"遇到 0 就停"：
+
+```c
+for (uint8_t i = 0; i < key_count && keys[i]; i++)                                  /* 按下检测 */
+for (uint8_t i = 0; i < HIDKIT_MAX_KEYS_PER_KB && st->last_keyboard_keys[i]; i++)    /* 释放检测 */
+```
+
+部分键盘按**固定槽位**上报（松开的键留空、不左移），报文形如
+`{0x04, 0x00, 0x05}`（a 与 b 之间空一槽）：只输出 a，b 永远不出现；松开时同理，
+b 的松开也不会补发 —— 映射引擎里该键会卡住。
+
+- 修法：`src/hid_dispatch.c` 两处改为跳过空槽（`if (keys[i] == 0) continue;`），
+  释放检测按 `last_keyboard_keys[]` 全量扫描；`hid_dispatch_reset()` 的卸载补发
+  同样改掉（否则卸载也补不齐）。
+- 用例：`test_boot_keyboard_zero_gap()`（`{0x04,0x00,0x05}` → 必须出 a、b 两个按下，
+  全零报文 → 两个松开）。修复前只有 1 个事件。
+- 为什么一直没被发现：样本用例与真机抓包里的 boot 键盘都是"键码左移紧凑排列"，
+  中间不留空；只有固定槽位上报的键盘才暴露。
+
+### 13. 配置宏调小后越界写（`HIDKIT_NKRO_BYTES` / `HIDKIT_MAX_SLOTS`）
+
+`HIDKIT_NKRO_BYTES` 是**按 keycode 索引**的 shadow 位图（键码空间 0x00..0xFF），
+旧实现直接按 keycode 索引，宏调小时越界：
+
+```c
+uint8_t *cell = &dev->last_keys[keycode >> 3];        /* nkro_key_edge */
+array_now[kc >> 3] |= ...;                            /* 数组段收集 */
+for (uint16_t kc = 0; kc < 256; kc++) ...             /* 数组段差集 / 卸载补发 */
+```
+
+`-DHIDKIT_NKRO_BYTES=8` 喂全键位图键盘时报
+`index 9 out of bounds for type 'uint8_t[8]'`（ASan/UBSan）；release 构建下会踩坏
+相邻的 `array_prev`，甚至相邻槽位的状态。
+
+另一处：槽位号是 `int8_t`，`HIDKIT_MAX_SLOTS > 127` 时
+`(int8_t)HIDKIT_MAX_SLOTS` 变成负数，所有守界判断把合法槽位全挡掉 ——
+挂载返回 −2，一个设备都认不了，且没有任何编译期提示。
+
+- 修法：
+  - 新增 `HID_NKRO_KEY_MAX`（= `HIDKIT_NKRO_BYTES*8 - 1`），`nkro_key_edge()`、
+    数组段收集、差集循环、`hid_nkro_release_all()` 全部以它为界；
+    超出容量的键**按设计丢弃**（少键而不越界）。
+  - `hidkit_config.h` 增加 `_Static_assert(HIDKIT_MAX_SLOTS <= 127, ...)`，
+    超大配置在编译期就报错，而不是运行时静默失效。
+- 用例：`test_nkro_bytes_config_clip()`（`-DHIDKIT_NKRO_BYTES=8` 下 0xFF 键必须
+  被丢弃且不越界、缓冲内的键仍正常）；其余 NKRO 用例的断言改为**按容量计算**
+  期望事件数，因此 `-DHIDKIT_NKRO_BYTES=1/2/3/8/31` 全绿。
+- 顺带修掉：`HIDKIT_ENABLE_GAMEPAD=0` 时 `k_xinput_btn_map` 未被引用，
+  `-Wall -Wextra -Werror` 下库本身编不过（等于该裁剪开关不可用）。
+
+相关用例：`test_evict()` 按 `HIDKIT_OVERFLOW` 分支断言（DROP_NEW 下应是
+`HIDKIT_ERR_NO_SLOT` 而不是挤出），手柄用例在 `HIDKIT_ENABLE_GAMEPAD=0` 下自动跳过。
+
+---
+
+### 14. 代码审计：描述符解析与槽位管理的九处缺陷
+
+以下九条来自一次**独立审计**（对着真实源码逐条写探针复现，全部在修复前的实现上
+观测到事件级后果），样本用例在 `tests/host/test_hidkit.c` 的「代码审计回归样本」
+一节（`test_audit_*`）。
+
+| # | 位置 | 触发 | 后果 |
+|---|---|---|---|
+| a | `hid_parser.c` 两处 `0x81` 非键盘页分支 | 媒体键 Input 之后紧接 `19 E0 29 E7` 修饰键范围 | 局部 usage 未被消费，残留的 `Usage(0xE9)` 压过 range → 8 位修饰键位图变成 8 个假的 0xE9；按 Shift 出音量键 |
+| b | 同上，`default` 分支 | Output/Feature 携带 Usage 后接无 usage 的 Input | 该 Input 继承上一个 usage，鼠标里多出偏移错位的 X 轴字段 |
+| c | `hid_parser.c` 两处 Usage 解析 | `0x0A/0x0B`（2/4 字节 Usage，规范合法写法） | 落进 default → usage 全丢；鼠标被认领却 `idx_x/y = 0xFF`，报文恒被"消费"却零事件 |
+| d | `hid_parser.c` 四处长 item 跳过 | 描述符含任意 `0xFE` 长 item | 漏跳 `bLongItemTag`，标签字节被当成下一个 item 前缀 → 其后整份描述符错位 |
+| e | `hid_parser.c` `mouse_field_body` 首帧 | 首帧报文里已有按键按下 | `initialized` 抑制首帧边沿 → 按下永久丢失，松开时补一个孤儿 UP |
+| f | `hid_parser.c` `lens_find` 未命中 | 描述符 Report ID 多于长度表容量（8） | 第 9 个 ID 的任意短杂报文重新被接受 —— 正好把第 11 条修掉的问题打开 |
+| g | `hid_parser.c` range 余数 | `Report Count 300` + 2 项 usage range | `(uint8_t)` 截断余数（298→42），后续字段偏移整体错位 |
+| h | `hidkit_dev.c` boot 解码器调用 | `CAP_*_BOOT` 路径收到 ≥256 字节报文 | `(uint8_t)len` 截断（264→8），被当成合法 boot 报文解出假位移/假按键 |
+| i | `hidkit_dev.c` `hidkit_init` / `slot_release` | 按着键 `hidkit_init()` 后重挂同一设备；手柄卸载 | `s_edge[]` 未清 → 同一按键零事件；`gamepad_hid_umount()` 从未被调用 → 卸载后 `gamepad_is_active()` 仍为真、槽位复用后旧手柄 VID:PID 仍匹配 |
+
+另外两处**不是解析缺陷、但会让宿主卡键**：
+
+- **XInput 路径从不填 `btn_map`**（`hidkit_xinput_report`）：`slot_release()`
+  的松开循环以 `map != NULL` 为前提，于是按住 A+Start 卸载后 0 个松开事件，
+  上层映射引擎里这些键永久按下。修法：入口处记下布局表。
+- **`HIDKIT_ENABLE_GAMEPAD=0` 时仍认领 `proto=GAMEPAD`**：槽位被永久占住，
+  但没有任何解析器接手（`hidkit_report` 恒返回 false）。修法：该配置下直接
+  返回 `HIDKIT_UNHANDLED`。
+
+**审计中判定不成立的一条**：`read_signed` 的"3 字节符号扩展缺失"。
+HID 的 item 只有 0/1/2/4 字节四种数据宽度（`bSize=3` → 4 字节），不存在
+3 字节形式；实测 `17 FF FF FF FF`（4 字节 Logical Minimum = −1）本来就
+正确解析为 -1。未改动该函数。
+
 ---
 
 ## 真机验证（USB gadget 回环）
@@ -252,8 +388,8 @@ BTstack HID Parser 的单遍 usage 迭代器、hidrd 的 item 覆盖）补齐/�
 一个接口可能把键位段与鼠标字段放在**同一个 Report ID** 里（带宏的键盘常见）。
 旧路由是"键盘优先"，同一份报文只会交给 `hid_nkro_dispatch()`，鼠标那半边被吃掉。
 现在当两种能力都由**显式 Report ID** 命中时，两份解析器各按自己的位偏移并行处理
-（对齐 Linux 逐字段模型）；没有 Report ID 的歧义报文仍按键盘优先，避免把键盘
-报文当鼠标轴读。
+（对齐 Linux 逐字段模型）；没有 Report ID 的歧义报文由第 11 条的长度校验与
+匹配强度择优处理。
 判据：`hid_nkro_uses_report_id()` / `hid_mouse_uses_report_id()`。
 用例：`test_combo_same_report_id`。
 
@@ -286,7 +422,8 @@ BTstack HID Parser 的单遍 usage 迭代器、hidrd 的 item 覆盖）补齐/�
 - **固定 8 字节鼠标路径**（`hid_dispatch_mouse`）只接受 `len == 8`；这是设备侧固定
   格式的约定，宿主侧鼠标请走描述符路径（`hid_mouse_parse` + `hid_mouse_dispatch`）。
 - **鼠标无描述符时静默丢弃**：`proto == MOUSE` 但 `report_desc == NULL`（描述符超过宿主
-  枚举缓冲）时，本库仍会接管该设备，但不产生事件。宿主可用
+  枚举缓冲）时，本库按固定 8 字节格式（`CAP_MOUSE_BOOT`）接管；若设备实际不是 8 字节
+  格式，报文长度不符时 `hid_dispatch_mouse()` 会丢弃它。宿主可用
   `hidkit_mount()` 的返回值与 `hidkit_is_active()` 自行决定要不要走兜底格式。
 - **描述符容量**：通用解析器最多 `HID_PARSE_MAX_FIELDS`(64) 个字段、鼠标
   `HID_MOUSE_MAX_FIELDS`(24) 个字段；字段数触顶后不再收录，但位偏移仍按

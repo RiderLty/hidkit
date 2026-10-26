@@ -34,9 +34,22 @@
     (HIDKIT_MAX_KEYBOARDS + HIDKIT_MAX_MICE + HIDKIT_MAX_GAMEPADS)
 #endif
 
+/* 槽位号在公开 API 里是 int8_t（句柄宽度 1 字节）。超过 127 个槽位时
+ * (int8_t)HIDKIT_MAX_SLOTS 变成负数，所有守界判断都会把合法槽位挡掉 ——
+ * 这里在编译期直接拦下，而不是让它静默地"挂不上任何设备"。 */
+#if defined(__cplusplus) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L)
+_Static_assert(HIDKIT_MAX_SLOTS <= 127, "hidkit: HIDKIT_MAX_SLOTS 不能超过 127（槽位句柄是 int8_t）");
+#endif
+
 /* ---- 解析容量 ---- */
 
-/* NKRO 位图缓冲字节数：32 = 最多 256 个键位（覆盖 HID Usage 0x04..0xFF） */
+/* NKRO 位图缓冲字节数：32 = 最多 256 个键位（覆盖 HID Usage 0x04..0xFF）。
+ *
+ * 这是**按 keycode 索引**的 shadow 位图（键码空间 0x00..0xFF，见
+ * hid_nkro_span_t.count 的 16 位宽度）。调小可以省 RAM，但超出
+ * HIDKIT_NKRO_BYTES*8 的键码就没有位置可记 —— 那些键按下时不会产生事件
+ * （解析器按 HID_NKRO_KEY_MAX 丢弃，不会越界）。描述符声明到 0xFF 的
+ * 全键位图键盘请保持 32。 */
 #ifndef HIDKIT_NKRO_BYTES
 #define HIDKIT_NKRO_BYTES 32
 #endif

@@ -76,6 +76,30 @@
  * 数据结构
  *--------------------------------------------------------------------*/
 
+/* 每个 Report ID 的输入报文数据体位宽（不含 Report ID 字节）。
+ *
+ * 描述符就是报文长度的**权威来源**：Report Size × Report Count 累加出多少位，
+ * 设备在固定长度的中断端点上就发多少字节。Linux hid-core 用同一判据
+ * （`report->size` → `hid_compute_report_size()`，不含 ID 字节）在
+ * `hid_report_raw_event()` 里拒收短报文，本表就是它的移植。
+ *
+ * 为什么必须校验整份报文长度：字段级的越界检查只保证"这个字段读得到"，
+ * 读得到不等于读得对。真机上 11 字节鼠标接口收到 2 字节杂报文（BE EF）时，
+ * X 轴字段（bit 8..23）恰好落在其中 → 解出 dx = -4162 的假位移，
+ * 上层表现为"没动鼠标但光标一直飞"。 */
+typedef struct {
+    uint8_t  id;         // Report ID（0 = 无 ID 前缀）
+    uint16_t bits;       // 该 Report ID 的输入数据体总位数（Output/Feature 不计）
+    uint16_t bits_kb;    // 其中属于最外层键盘集合的位数（0 = 该 ID 没有键盘集合）
+    uint16_t bits_mouse; // 其中属于最外层鼠标集合的位数（0 = 该 ID 没有鼠标集合）
+} hid_report_len_t;
+
+#define HID_REPORT_LEN_TABLE 8   // 一张表最多记 8 个 Report ID
+
+/* 超出表容量的 Report ID 会被标成"长度未声明"（lens_overflow）。
+ * 这时匹配函数**拒绝**该 ID 的报文（而不是无条件接受）—— 接受等于把
+ * "短报文造假位移"重新打开；拒绝只是把这份报文交回宿主。 */
+
 // 展开后的单个 HID 字段（一个 usage → 一个字段）
 typedef struct {
     uint16_t usage_page;    // Usage Page（如 0x01 = Generic Desktop）
@@ -106,13 +130,18 @@ typedef struct {
     // 因此不像原来那样只记"起始字段 + 个数"。
     uint8_t     btn_idx[HID_MOUSE_MAX_BTNS];
     uint8_t     button_count;       // 按键个数（≤ HID_MOUSE_MAX_BTNS）
+
+    // 各 Report ID 的报文数据体长度（整份描述符累计，含被 mouse_field_keep
+    // 滤掉的集合）——接受报文前用它校验"这份报文根本不可能是我的"
+    hid_report_len_t lens[HID_REPORT_LEN_TABLE];
+    uint8_t     num_lens;
+    bool        lens_overflow;      // 描述符的 Report ID 多于表容量（见 hid_desc_report_bits）
 } hid_mouse_desc_t;
 
 // 鼠标设备句柄 = 描述符 + 边沿检测状态
 typedef struct {
     hid_mouse_desc_t desc;
-    uint8_t          last_buttons;   // 上一帧按键位掩码
-    bool             initialized;    // 是否已收到过报告（首帧不触发边沿）
+    uint8_t          last_buttons;   // 上一帧按键位掩码（初值 0 = 全部抬起）
 } hid_mouse_dev_t;
 
 // ---- NKRO 键盘 ----
@@ -122,6 +151,10 @@ typedef struct {
 #define HID_NKRO_MAX_SPANS    8    // 单接口最多键位段（主位图/修饰键/小键盘常分 2~3 段）
 #define HID_NKRO_MAX_ARRAY    32   // 数组段最多槽数（6KRO=6；Win8 全键 Rollover 可达全键）
 #define HID_NKRO_KEY_MIN      0x04 // 0x00-0x03 为 ErrorRollOver 等保留键，不产生事件
+
+// shadow 位图能记的最高 keycode（HIDKIT_NKRO_BYTES*8-1）：调小缓冲时超出它的键
+// 既不记也不发事件 —— 宁可少键，不能越界写
+#define HID_NKRO_KEY_MAX      (HIDKIT_NKRO_BYTES * 8 - 1)
 
 // NKRO 键位段：一段连续 keycode 的位图（或 keycode 数组）
 typedef struct {
@@ -137,6 +170,11 @@ typedef struct {
 typedef struct {
     hid_nkro_span_t spans[HID_NKRO_MAX_SPANS];
     uint8_t num_spans;
+
+    // 各 Report ID 的报文数据体长度（整份描述符累计，含键位段之外的集合）
+    hid_report_len_t lens[HID_REPORT_LEN_TABLE];
+    uint8_t num_lens;
+    bool    lens_overflow;          // 描述符的 Report ID 多于表容量
 } hid_nkro_desc_t;
 
 // NKRO 设备句柄 = 描述符 + shadow 位图（按 keycode 索引的按下状态，用于边沿检测与拔出补发）
@@ -189,6 +227,22 @@ uint8_t hid_parse_report_fields_filtered(hid_field_t *fields, uint8_t max_fields
 
 
 /**
+ * @brief 从描述符统计每个 Report ID 的输入报文数据体位宽
+ *
+ * 只累加 Input item（Output/Feature 不占输入报文长度），Report ID 另记
+ * （不计入数据体位宽）。每一位宽同时按最外层 Application Collection 归类
+ * （键盘 / 鼠标 / 其它），供无 Report ID 的键鼠共接口设备按长度分流。
+ *
+ * @param data    描述符
+ * @param len     描述符长度
+ * @param out     输出表
+ * @param max_out 表容量（≤ HID_REPORT_LEN_TABLE）
+ * @return 写入的条目数（0 = 没有 Input item）
+ */
+uint8_t hid_desc_report_bits(const uint8_t *data, uint16_t len,
+                             hid_report_len_t *out, uint8_t max_out);
+
+/**
  * @brief 描述符是否声明了鼠标（顶层 Application Collection 为 Mouse/Pointer）
  *
  * 用于复合设备判定：「键盘 + 鼠标」同接口时，接口的 bInterfaceProtocol 往往
@@ -238,21 +292,40 @@ void hid_mouse_dispatch(int8_t slot, hid_mouse_dev_t *dev,
                         const uint8_t *report, uint16_t len);
 
 /**
- * @brief 这份报文是否属于本鼠标描述符（按字段的 Report ID 判定）
+ * @brief 这份报文是否属于本鼠标描述符（按字段的 Report ID + 描述符声明的长度判定）
  *
  * 多集合/多 Report ID 接口上，host 用它在多个解析器之间路由：
- *   - 描述符里的相关字段都没有 Report ID（0）→ 总返回 true（整份报文即数据体）
- *   - 否则要求 len >= 1 且 report[0] 命中某个 X/Y/Wheel/按键字段的 Report ID
+ *   - Report ID：描述符里的相关字段都没有 Report ID（0）时整份报文即数据体；
+ *     否则要求 len >= 1 且 report[0] 命中某个 X/Y/Wheel/按键字段的 Report ID
+ *   - 长度：描述符声明的**整份报文**位宽必须被报文装下（不是只算鼠标字段：
+ *     设备永远按描述符声明的总量发包，按字段位宽比会把真正的杂报文放进来）。
+ *     <b>短报文一律拒绝</b> —— 字段级越界检查只保证"读得到"，2 字节杂报文
+ *     照样能把 11 字节鼠标的 X 轴解出一个假位移（真机 BE EF → dx=-4162）。
+ *   - 描述符的 Report ID 多于长度表容量时（`lens_overflow`），表外的 ID 一律
+ *     不接受 —— 交宿主，而不是猜。
+ *
+ * @return true 表示这份报文应由本解析器处理
  */
 bool hid_mouse_accepts(const hid_mouse_dev_t *dev,
                        const uint8_t *report, uint16_t len);
 
 /**
+ * @brief 与 hid_mouse_accepts 相同，但返回匹配强度，供多解析器之间择优
+ *
+ * @return 0 = 不是我的报文；1 = 长度够；2 = 长度与描述符精确吻合
+ *
+ * 无 Report ID 的"键盘 + 鼠标"同接口设备（廉价 2.4G 接收器）里，键盘与鼠标
+ * 报文都命不中 Report ID，只能靠长度分流：此时长度吻合（2）胜过仅仅够长（1）。
+ */
+uint8_t hid_mouse_match(const hid_mouse_dev_t *dev,
+                        const uint8_t *report, uint16_t len);
+
+/**
  * @brief 本鼠标描述符的相关字段（X/Y/Wheel/按键）是否带显式 Report ID
  *
- * 路由用：同一接口同时有键盘与鼠标能力、且二者都由同一个显式 Report ID 命中时，
- * 两份解析器必须**并行**处理同一报文（对齐 Linux hid-input 的逐字段模型）；
- * 而没有 Report ID 的歧义报文仍按键盘优先。
+ * 路由用：同一接口同时有键盘与鼠标能力时，两份解析器是否处理同一份报文交给
+ * hidkit_report() 按长度判定（`hid_mouse_match` / `hid_nkro_match` 的匹配强度）。
+ * 本函数只回答"字段是否带显式 Report ID"，供需要区分布局的调用方使用。
  */
 bool hid_mouse_uses_report_id(const hid_mouse_dev_t *dev);
 
@@ -297,13 +370,24 @@ bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len);
 void hid_nkro_dispatch(int8_t slot, hid_nkro_dev_t *dev, const uint8_t *report, uint16_t len);
 
 /**
- * @brief 这份报文是否属于本 NKRO 描述符（按键位段的 Report ID 判定）
+ * @brief 这份报文是否属于本 NKRO 描述符（按键位段的 Report ID + 声明长度判定）
  *
- * 语义与 hid_mouse_accepts 对称：所有段都没有 Report ID → 总接受；
- * 否则要求 report[0] 命中某个段的 Report ID。
+ * 语义与 hid_mouse_accepts 对称：Report ID 命中（或描述符无 ID）且报文装得下
+ * 描述符声明的**整份报文**位宽。短报文一律拒绝；表外 Report ID 同样拒绝。
+ *
+ * @return true 表示这份报文应由本解析器处理
  */
 bool hid_nkro_accepts(const hid_nkro_dev_t *dev,
                       const uint8_t *report, uint16_t len);
+
+/**
+ * @brief 与 hid_nkro_accepts 相同，但返回匹配强度（0/1/2）
+ *
+ * 语义与 hid_mouse_match 对称；无 Report ID 的键鼠共接口设备靠它把鼠标报文
+ * 从键盘解析器里分流出去。
+ */
+uint8_t hid_nkro_match(const hid_nkro_dev_t *dev,
+                       const uint8_t *report, uint16_t len);
 
 /**
  * @brief 本 NKRO 描述符的键位段是否带显式 Report ID（语义与

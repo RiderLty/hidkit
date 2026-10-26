@@ -162,12 +162,16 @@ static bool HIDKIT_HOT(ds5_parse)(const uint8_t *report, uint16_t len,
     int32_t rx = (int32_t)rpt->rs_x - DS5_STICK_MID;
     int32_t ry = (int32_t)rpt->rs_y - DS5_STICK_MID;
 
-    // 摇杆原始 8bit(0~255)，中心化后 -128~+127；左移 8 位即映射到 int16 量程
+    // 摇杆原始 8bit(0~255)，中心化后 -128~+127；×256 即映射到 int16 量程
     // （-32768 ~ +32512）。比 ×258 更便宜，负向也不再越出 int16。
-    out->ls_x = lx << 8;
-    out->ls_y = ly << 8;
-    out->rs_x = rx << 8;
-    out->rs_y = ry << 8;
+    //
+    // 用乘法而不是 `<< 8`：C 标准里**左移负数是未定义行为**，-128 一帧就会让
+    // UBSan 报 "left shift of negative value"；乘法在 int32 范围内无溢出，
+    // 语义相同（编译器对常量的乘法照样编译成移位）。
+    out->ls_x = lx * 256;
+    out->ls_y = ly * 256;
+    out->rs_x = rx * 256;
+    out->rs_y = ry * 256;
 
     // --- 模拟扳机 ---
     out->lt = ((int32_t)rpt->lt * (int32_t)(INT16_MAX / DS5_TRIG_MAX));
