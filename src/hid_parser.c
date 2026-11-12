@@ -425,8 +425,10 @@ static void lens_add(hid_report_len_t *lens, uint8_t *n, uint8_t max,
     }
 }
 
-// 带溢出标志的内部版本：descriptor 的 Report ID 多于表容量时置 *overflow
-static uint8_t HIDKIT_HOT(lens_scan)(const uint8_t *data, uint16_t len,
+// 带溢出标志的内部版本：descriptor 的 Report ID 多于表容量时置 *overflow。
+// 只在挂载期解析描述符时调用（hid_desc_report_bits / hid_mouse_parse /
+// hid_nkro_parse），不属于每报文热路径，故不进 RAM。
+static uint8_t lens_scan(const uint8_t *data, uint16_t len,
                                      hid_report_len_t *out, uint8_t max_out,
                                      bool *overflow)
 {
@@ -953,7 +955,8 @@ bool HIDKIT_HOT(hid_mouse_uses_report_id)(const hid_mouse_dev_t *dev)
     return false;
 }
 
-void HIDKIT_HOT(hid_mouse_release_all)(int8_t slot, hid_mouse_dev_t *dev)
+// 只在卸载 / 槽位挤出时调用（非每报文路径），不进 RAM。
+void hid_mouse_release_all(int8_t slot, hid_mouse_dev_t *dev)
 {
     if (slot < 0 || slot >= (int8_t)HIDKIT_MAX_SLOTS) return;
     if (!dev) return;
@@ -974,13 +977,14 @@ void HIDKIT_HOT(hid_mouse_release_all)(int8_t slot, hid_mouse_dev_t *dev)
  * 字段偏移全错）。NKRO dispatch 只需要"位段 + 起始 keycode"，故这里
  * 用同款 item 走查骨架单独记录 span。
  *
- * 全部函数用 HIDKIT_HOT 标注（Pico 上展开为 __not_in_flash_func 入 RAM）：
- * dispatch/key_edge 跑在输入热路径上，主核写 flash 期间 XIP 停摆，
- * 留在 flash 会在这段窗口拖住 NKRO 报文处理。
+ * **只给每报文路径**（dispatch / match / key_edge / lens_find）标 HIDKIT_HOT
+ * 入 RAM：主核写 flash 期间 XIP 停摆，留在 flash 会拖住 NKRO 报文处理。
+ * 描述符解析（hid_nkro_parse / nkro_append_span）只在挂载期跑一次，不标。
  *--------------------------------------------------------------------*/
 
-// 追加一个键位段；段满时丢弃（超出 HID_NKRO_MAX_SPANS 的段极罕见）
-static void HIDKIT_HOT(nkro_append_span)(hid_nkro_desc_t *desc, uint8_t report_id,
+// 追加一个键位段；段满时丢弃（超出 HID_NKRO_MAX_SPANS 的段极罕见）。
+// 只在描述符解析（挂载期）调用，不进 RAM。
+static void nkro_append_span(hid_nkro_desc_t *desc, uint8_t report_id,
                              uint16_t bit_offset, uint8_t usage_min,
                              uint16_t count, uint8_t bit_size)
 {
@@ -993,7 +997,8 @@ static void HIDKIT_HOT(nkro_append_span)(hid_nkro_desc_t *desc, uint8_t report_i
     s->bit_size   = bit_size;
 }
 
-bool HIDKIT_HOT(hid_nkro_parse)(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len)
+// 描述符解析只在挂载期跑一次，不进 RAM（挂载期不受"每报文 XIP 停摆"约束）。
+bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len)
 {
     if (!desc || !data || len == 0) return false;
     memset(desc, 0, sizeof(*desc));
@@ -1388,7 +1393,8 @@ void HIDKIT_HOT(hid_nkro_dispatch)(int8_t slot, hid_nkro_dev_t *dev, const uint8
     }
 }
 
-void HIDKIT_HOT(hid_nkro_release_all)(int8_t slot, hid_nkro_dev_t *dev)
+// 只在卸载 / 槽位挤出时调用（非每报文路径），不进 RAM。
+void hid_nkro_release_all(int8_t slot, hid_nkro_dev_t *dev)
 {
     // hidkit：入口做槽位守界，越界直接丢弃（等价于原有越界丢弃）
     if (slot < 0 || slot >= (int8_t)HIDKIT_MAX_SLOTS) return;
