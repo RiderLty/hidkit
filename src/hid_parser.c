@@ -997,6 +997,28 @@ static void nkro_append_span(hid_nkro_desc_t *desc, uint8_t report_id,
     s->bit_size   = bit_size;
 }
 
+// 该 keycode 是否已被同一 Report ID 下更早的位图段占用。
+//
+// 语义对齐 Linux hid-input 对重复 usage 的处理（hidinput_configure_usage 的
+// HID_STAT_DUP_DETECTED → ignore）：先声明的字段拥有该键码，后声明者整个忽略。
+// 真机 373b:1258 的描述符把修饰键声明了两次——先是 `19 E0 29 E7` 的 8 位修饰键段，
+// 随后 `19 00 29 F0` 的 240 位键位图又覆盖 0xE0..0xEF；设备只在修饰字节置位。
+// 若两段都参与边沿检测，同一帧会先按修饰段发 down、再被位图段的 0 抵消成 up
+// （表现为 Shift/Ctrl 瞬间按下抬起）。把重号键码当作空洞裁掉后，同一 Report ID
+// 下每个键码只属于一个 span，dispatch 的边沿检测才对得上。
+static bool nkro_key_covered(const hid_nkro_desc_t *desc, uint8_t report_id,
+                             uint16_t keycode)
+{
+    for (uint8_t s = 0; s < desc->num_spans; s++) {
+        const hid_nkro_span_t *sp = &desc->spans[s];
+        if (sp->report_id != report_id || sp->bit_size != 1) continue;
+        uint32_t lo = sp->usage_min;
+        uint32_t hi = lo + sp->count;
+        if (keycode >= lo && keycode < hi) return true;
+    }
+    return false;
+}
+
 // 描述符解析只在挂载期跑一次，不进 RAM（挂载期不受"每报文 XIP 停摆"约束）。
 bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len)
 {
@@ -1144,8 +1166,15 @@ bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len)
                     } else {
                         break;
                     }
-                    // 0x00-0x03 为 ErrorRollOver 等保留键，视作空洞不产生事件
-                    bool gap = (kc < HID_NKRO_KEY_MIN || kc > 0xFF);
+                    // 0x00-0x03 为 ErrorRollOver 等保留键，视作空洞不产生事件；
+                    // 已被更早位图段声明、或本段内已出现过的键码同样视作空洞
+                    // （先声明者拥有，见 nkro_key_covered），否则重号键码会在
+                    // 同一帧内 down 完又 up。本段内的重复只在显式 usage 列表
+                    // 重复同一 usage 时出现（跑着的 run 还没进 spans）。
+                    uint16_t run_hi = (uint16_t)run_min + run_len;
+                    bool dup_in_run = (run_len > 0 && kc >= run_min && kc < run_hi);
+                    bool gap = (kc < HID_NKRO_KEY_MIN || kc > 0xFF || dup_in_run ||
+                                nkro_key_covered(desc, cur_report_id, (uint16_t)kc));
                     if (!gap && run_len > 0 && kc == run_min + run_len) {
                         run_len++;
                     } else {
@@ -1238,8 +1267,10 @@ bool hid_nkro_parse(hid_nkro_desc_t *desc, const uint8_t *data, uint16_t len)
     return desc->num_spans > 0;
 }
 
-// 单键边沿检测 + shadow 更新（所有段共用一份 shadow，按 keycode 索引；
-// 位图段与数组段、跨 Report ID 的重复键都由此去重）
+// 单键边沿检测 + shadow 更新（所有段共用一份 shadow，按 keycode 索引）。
+// 解析期保证同一 Report ID 下每个键码最多被一个位图段声明（先声明者拥有，
+// 见 nkro_key_covered），所以同一帧不会对同一个键先 down 再 up；shadow 负责
+// 跨报文的去重。数组段的值运行期才知道，它与位图段撞键仍属已知边角限制。
 /* keycode 是否落进 shadow 位图可记的范围。
  *
  * 单独抽成函数（参数是 uint16_t）是为了避开 -Wtype-limits：容量为默认 32 字节时

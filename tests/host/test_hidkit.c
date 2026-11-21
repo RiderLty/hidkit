@@ -354,6 +354,55 @@ static const uint8_t k_nkro_desc_two_byte_page[] = {
     0xC0,              /* End Collection */
 };
 
+/* 缺陷 12：同一 Report ID 下两个位图段的键码重叠。
+ *
+ * 真机 373b:1258（日志 2026-11-21T15-45）：修饰键先声明为 8 位段
+ * （usage 0xE0..0xE7），随后 240 位键位图声明 usage 0x00..0xF0，把 0xE0..0xE7
+ * 又覆盖了一遍；设备只在修饰字节置位、不镜像位图里的修饰位。修复前两个段都参与
+ * 边沿检测，同一帧先按修饰段发 down、再被位图段的 0 抵消成 up（Shift/Ctrl 表现为
+ * 瞬间按下抬起）。修复后重号键码只归先声明的修饰段。 */
+static const uint8_t k_nkro_desc_modifier_overlap[] = {
+    0x05, 0x07,        /* Usage Page (Keyboard/Keypad) */
+    0x09, 0x06,        /* Usage (Keyboard) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x85, 0x06,        /*   Report ID (6) */
+    0x05, 0x07,        /*   Usage Page (Keyboard/Keypad) */
+    0x19, 0xE0,        /*   Usage Minimum (0xE0) */
+    0x29, 0xE7,        /*   Usage Maximum (0xE7) */
+    0x15, 0x00,        /*   Logical Minimum (0) */
+    0x25, 0x01,        /*   Logical Maximum (1) */
+    0x95, 0x08,        /*   Report Count (8) */
+    0x75, 0x01,        /*   Report Size (1) */
+    0x81, 0x02,        /*   Input (Data,Var,Abs) → 修饰位段 @bit0 */
+    0x05, 0x07,        /*   Usage Page (Keyboard/Keypad) */
+    0x19, 0x00,        /*   Usage Minimum (0) */
+    0x29, 0xF0,        /*   Usage Maximum (0xF0) → 与修饰段重叠 */
+    0x15, 0x00,        /*   Logical Minimum (0) */
+    0x25, 0x01,        /*   Logical Maximum (1) */
+    0x95, 0xF0,        /*   Report Count (240) */
+    0x75, 0x01,        /*   Report Size (1) */
+    0x81, 0x02,        /*   Input (Data,Var,Abs) → 键位图 @bit8 */
+    0xC0,              /* End Collection */
+};
+
+/* 缺陷 15（续）：同一个 Input 的显式 usage 列表重复声明同一键码。
+ * 规则与跨字段重叠相同 —— 先声明者拥有：后一位不参与边沿检测，否则同一帧
+ * 会先 down 再 up（显式 usage 列表重复是合法写法，工具生成的描述符可能出现）。 */
+static const uint8_t k_nkro_desc_dup_usage[] = {
+    0x05, 0x07,        /* Usage Page (Keyboard/Keypad) */
+    0x09, 0x06,        /* Usage (Keyboard) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x05, 0x07,        /*   Usage Page (Keyboard/Keypad) */
+    0x09, 0x04,        /*   Usage (0x04) */
+    0x09, 0x04,        /*   Usage (0x04)：重复声明 */
+    0x15, 0x00,        /*   Logical Minimum (0) */
+    0x25, 0x01,        /*   Logical Maximum (1) */
+    0x95, 0x02,        /*   Report Count (2) */
+    0x75, 0x01,        /*   Report Size (1) */
+    0x81, 0x02,        /*   Input (Data,Var,Abs) */
+    0xC0,              /* End Collection */
+};
+
 /*--------------------------------------------------------------------+
  * 用例
  *--------------------------------------------------------------------*/
@@ -750,6 +799,95 @@ static void test_nkro_two_byte_page_and_end_collection(void)
     CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04),
           "bit0 应产生 0x04 按下，实得 %d 个事件", g_key_n);
     hidkit_umount(slot);
+}
+
+static void test_nkro_modifier_overlap(void)
+{
+    printf("NKRO 路径：修饰键段与键位图键码重叠（缺陷 12）\n");
+    hid_nkro_desc_t nd;
+    CHECK(hid_nkro_parse(&nd, k_nkro_desc_modifier_overlap,
+                         sizeof(k_nkro_desc_modifier_overlap)),
+          "应解析成功");
+    /* 修复前第二段是 0x04..0xEF（236 位），与修饰段重复声明 0xE0..0xE7；
+     * 修复后应拆成 0x04..0xDF 与 0xE8..0xEF 两段。 */
+    CHECK(nd.num_spans == 3, "应拆成 3 段（修饰 + 两段键位图），实得 %u",
+          (unsigned)nd.num_spans);
+    CHECK(nd.spans[1].usage_min == 0x04 && nd.spans[1].count == 220 &&
+          nd.spans[1].bit_offset == 12,
+          "第二段应为 0x04 起 220 位、偏移 12，实得 min=0x%02X count=%u off=%u",
+          (unsigned)nd.spans[1].usage_min, (unsigned)nd.spans[1].count,
+          (unsigned)nd.spans[1].bit_offset);
+    CHECK(nd.spans[2].usage_min == 0xE8 && nd.spans[2].count == 8 &&
+          nd.spans[2].bit_offset == 240,
+          "第三段应为 0xE8 起 8 位、偏移 240，实得 min=0x%02X count=%u off=%u",
+          (unsigned)nd.spans[2].usage_min, (unsigned)nd.spans[2].count,
+          (unsigned)nd.spans[2].bit_offset);
+
+    ev_reset();
+    hidkit_dev_info_t info = { .vid = 0x373b, .pid = 0x1258, .dev_addr = 10, .itf = 0,
+                               .proto = HIDKIT_PROTO_NONE,
+                               .report_desc = k_nkro_desc_modifier_overlap,
+                               .report_desc_len = sizeof(k_nkro_desc_modifier_overlap) };
+    int8_t slot = hidkit_mount(&info);
+    CHECK(slot >= 0, "应接管为 NKRO 键盘，得到 %d", slot);
+
+    uint8_t rep[32];
+    memset(rep, 0, sizeof(rep));
+    rep[0] = 0x06;                       /* Report ID 6 */
+    rep[1] = 0x01;                       /* 修饰字节 bit0 = LeftCtrl */
+    CHECK(hidkit_report(slot, rep, sizeof(rep)), "报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0xE0) &&
+          g_key[0].pressed,
+          "Ctrl 按下应只产生 1 个 down，实得 %d 个事件", g_key_n);
+
+    ev_reset();
+    rep[1] = 0x00;                       /* 松开修饰键 */
+    CHECK(hidkit_report(slot, rep, sizeof(rep)), "报文应被消费");
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0xE0) &&
+          !g_key[0].pressed,
+          "Ctrl 松开应只产生 1 个 up，实得 %d 个事件", g_key_n);
+
+    /* 修饰键与普通键同帧：A(usage 0x04) 在键位图里，靠近位图段而非修饰段 */
+    ev_reset();
+    rep[1] = 0x01;
+    rep[2] = 0x10;                       /* 位图 bit4 → usage 0x04 = A */
+    CHECK(hidkit_report(slot, rep, sizeof(rep)), "报文应被消费");
+    CHECK(g_key_n == 2 &&
+          g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0xE0) && g_key[0].pressed &&
+          g_key[1].code == (HIDKIT_CODE_KEYBOARD | 0x04) && g_key[1].pressed,
+          "应产生 Ctrl down + A down 两个事件，实得 %d 个事件", g_key_n);
+
+    hidkit_umount(slot);
+}
+
+static void test_nkro_duplicate_usage_list(void)
+{
+    printf("NKRO 路径：同一 Input 内重复声明键码（缺陷 15 续）\n");
+    hid_nkro_desc_t nd;
+    CHECK(hid_nkro_parse(&nd, k_nkro_desc_dup_usage, sizeof(k_nkro_desc_dup_usage)),
+          "应解析成功");
+    CHECK(nd.num_spans == 1 && nd.spans[0].usage_min == 0x04 &&
+          nd.spans[0].count == 1 && nd.spans[0].bit_offset == 0,
+          "后一位重复声明应被裁掉，只留 1 段 0x04、偏移 0，实得 spans=%u",
+          (unsigned)nd.num_spans);
+
+    hid_nkro_dev_t dev;
+    memset(&dev, 0, sizeof(dev));
+    memcpy(&dev.desc, &nd, sizeof(nd));
+
+    ev_reset();
+    const uint8_t press[] = { 0x01 };
+    hid_nkro_dispatch(0, &dev, press, sizeof(press));
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04) &&
+          g_key[0].pressed,
+          "按下应只产生 1 个 down，实得 %d 个事件", g_key_n);
+
+    ev_reset();
+    const uint8_t release[] = { 0x00 };
+    hid_nkro_dispatch(0, &dev, release, sizeof(release));
+    CHECK(g_key_n == 1 && g_key[0].code == (HIDKIT_CODE_KEYBOARD | 0x04) &&
+          !g_key[0].pressed,
+          "松开应只产生 1 个 up，实得 %d 个事件", g_key_n);
 }
 
 /* 缺陷 6：Report Count = 0 的 main item 不产生字段、也不占位。
@@ -2313,6 +2451,8 @@ int main(void)
     test_parser_end_collection_clears_local();
     test_mouse_multi_report_id();
     test_nkro_two_byte_page_and_end_collection();
+    test_nkro_modifier_overlap();
+    test_nkro_duplicate_usage_list();
     test_parser_zero_report_count();
     test_combo_mouse_nkro();
     test_nkro_array_release();
